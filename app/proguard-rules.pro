@@ -269,3 +269,7 @@
 # sherpa-onnx (audio subtitle sync speech recognition): JNI reads config fields by name.
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keep interface com.k2fsa.sherpa.onnx.** { *; }
+
+# Streaming Modes TV: libtorrent4j (SWIG/JNI)
+-keep class org.libtorrent4j.** { *; }
+-dontwarn org.libtorrent4j.**

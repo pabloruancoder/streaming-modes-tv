@@ -898,6 +898,36 @@ class StreamRepository @Inject constructor(
     }
 
     /**
+     * Streaming Modes TV: addons que já vêm instalados em cada perfil novo (o mesmo caminho do "Add Addon",
+     * com o manifesto completo, para as fileiras de catálogo aparecerem). Roda uma vez por perfil: se a pessoa
+     * remover um deles depois, ele não volta. Um que falhar (sem internet) é tentado de novo na próxima abertura.
+     */
+    suspend fun ensureStarterAddons(): Boolean = withContext(Dispatchers.IO) {
+        val doneKey = profileManager.profileStringKey("sm_starter_addons_v1")
+        val done = context.streamDataStore.data.first()[doneKey].orEmpty().split('\n').filter { it.isNotBlank() }.toSet()
+        val pending = STARTER_ADDON_URLS.filter { it !in done }
+        android.util.Log.i("StarterAddons", "pendentes=${STARTER_ADDON_URLS.size - done.size} perfil=${profileManager.getProfileIdSync()}")
+        if (pending.isEmpty()) return@withContext false
+        val installed = runCatching { installedAddons.first() }.getOrDefault(emptyList())
+        val ok = mutableSetOf<String>()
+        var addedNew = false
+        for (url in pending) {
+            val base = url.removeSuffix("/manifest.json")
+            val already = installed.any { a ->
+                listOfNotNull(a.url, a.transportUrl).any { it.removeSuffix("/manifest.json").trimEnd('/') == base }
+            }
+            if (already) { ok += url; continue }
+            val result = addCustomAddon(url)
+            if (result.isSuccess) { ok += url; addedNew = true }
+            android.util.Log.i("StarterAddons", "$url -> ${if (result.isSuccess) "instalado" else "falhou: ${result.exceptionOrNull()}"}")
+        }
+        if (ok.isNotEmpty()) {
+            context.streamDataStore.edit { prefs -> prefs[doneKey] = (done + ok).joinToString("\n") }
+        }
+        addedNew
+    }
+
+    /**
      * Fetch an addon's manifest without installing it, so the caller can ask the user first.
      */
     suspend fun prepareCustomAddon(url: String): Result<Addon> = withContext(Dispatchers.IO) {
@@ -3306,7 +3336,21 @@ class StreamRepository @Inject constructor(
             .map { stream ->
                 addonYouTubeStream(stream, addon)?.let { return@map it }
                 val rawStreamUrl = stream.getStreamUrl()
+                // Fontes P2P (infoHash ou magnet:) tocam pelo torrent embutido: viram um endereço local.
+                val torrentUrl = if (!stream.infoHash.isNullOrBlank() && rawStreamUrl.isNullOrBlank() ||
+                    rawStreamUrl?.startsWith("magnet:", ignoreCase = true) == true
+                ) {
+                    com.arflix.tv.data.torrent.TorrentStream.urlFor(
+                        context = context,
+                        infoHash = stream.infoHash,
+                        magnetUrl = rawStreamUrl,
+                        fileIdx = stream.fileIdx,
+                        sources = stream.sources,
+                        fileName = stream.behaviorHints?.filename
+                    )
+                } else null
                 val streamUrl = when {
+                    torrentUrl != null -> torrentUrl
                     !rawStreamUrl.isNullOrBlank() -> rawStreamUrl
                     // Some addons use ytId without providing a URL.
                     !stream.ytId.isNullOrBlank() -> "https://www.youtube.com/watch?v=${stream.ytId}"
@@ -4703,7 +4747,12 @@ class StreamRepository @Inject constructor(
         val url = stream.url?.trim().orEmpty()
         if (url.isBlank()) return null
 
-        // Debrid/direct-only playback path: ignore magnet/infoHash-only P2P streams.
+        // Torrent embutido: o endereço local já é tocável (o servidor busca os metadados quando o player pedir).
+        if (com.arflix.tv.data.torrent.TorrentStream.isLocalUrl(url)) {
+            val live = com.arflix.tv.data.torrent.TorrentStream.refreshUrl(context, url) ?: return null
+            return if (live == url) stream else stream.copy(url = live)
+        }
+        // Magnet que não virou endereço local (hash inválido): não tocável.
         if (url.startsWith("magnet:", ignoreCase = true)) return null
 
         // Stalker VOD sources carry a `stalker_vod://` placeholder instead of a
@@ -5409,6 +5458,28 @@ private object StreamRegexes {
 /**
  * Addon configuration
  */
+/** Addons pré-instalados do Streaming Modes TV (ver [StreamRepository.ensureStarterAddons]). */
+private val STARTER_ADDON_URLS = listOf(
+    // Fileiras do modo Netflix (GitHub Pages do projeto)
+    "https://pabloruancoder.github.io/stremio-streaming-modes/manifest.json",
+    // Torrentio Brazuca
+    "https://torrentio.strem.fun/brazuca/manifest.json",
+    // Torrentio (configurado: provedores, ordem, idioma, filtro de qualidade)
+    "https://torrentio.strem.fun/providers=yts,eztv,rarbg,1337x,thepiratebay,kickasstorrents,torrentgalaxy,magnetdl,horriblesubs,nyaasi,tokyotosho,anidex,comando,bludv%7Csort=seeders%7Clanguage=portuguese%7Cqualityfilter=threed,cam,unknown/manifest.json",
+    // Torrentio
+    "https://torrentio.strem.fun/manifest.json",
+    // Comet | ElfHosted (modo torrent, sem debrid)
+    "https://comet.elfhosted.com/eyJtYXhSZXN1bHRzUGVyUmVzb2x1dGlvbiI6MCwibWF4U2l6ZSI6MCwiY2FjaGVkT25seSI6ZmFsc2UsInJlbW92ZVRyYXNoIjp0cnVlLCJyZXN1bHRGb3JtYXQiOlsiYWxsIl0sImRlYnJpZFNlcnZpY2UiOiJ0b3JyZW50IiwiZGVicmlkQXBpS2V5IjoiIiwiZGVicmlkU3RyZWFtUHJveHlQYXNzd29yZCI6IiIsImxhbmd1YWdlcyI6eyJyZXF1aXJlZCI6WyJlbiIsInB0Il0sImV4Y2x1ZGUiOltdLCJwcmVmZXJyZWQiOlsicHQiXX0sInJlc29sdXRpb25zIjp7fSwib3B0aW9ucyI6eyJyZW1vdmVfcmFua3NfdW5kZXIiOi0xMDAwMDAwMDAwMCwiYWxsb3dfZW5nbGlzaF9pbl9sYW5ndWFnZXMiOmZhbHNlLCJyZW1vdmVfdW5rbm93bl9sYW5ndWFnZXMiOmZhbHNlfX0=/manifest.json",
+    // BestCine
+    "https://bestcine.dpdns.org/manifest.json",
+    // FrostStream
+    "https://froststream.cloutteam.com/manifest.json",
+    // FenixFlix (configurado: qualidades, áudio, catálogos)
+    "https://fenixflix.fenixhub.online/qualities=4k,1080p,720p,sd,cam%7Caudio=dublado,legendado%7Ccatalogs=populares_movie,populares_series,recentes_movie,recentes_series/manifest.json",
+    // FenixFlix
+    "https://fenixflix.fenixhub.online/manifest.json",
+)
+
 data class AddonConfig(
     val id: String,
     val name: String,

@@ -1985,7 +1985,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
         uiState.selectedStreamUrl, uiState.streamSelectionNonce, duration, args.isLiveStream,
         uiState.selectedStream?.preview, allowSecondarySeekPreviewDecoder, useNativeSeekKeyframes,
     ) {
-        if (!seekThumbnailsEnabled) {
+        // Torrent embutido: a prévia pediria pedaços espalhados do arquivo e atrasaria o download em ordem.
+        if (!seekThumbnailsEnabled || com.arflix.tv.data.torrent.TorrentStream.isLocalUrl(uiState.selectedStreamUrl)) {
             seekPreviewProvider.configure(null)
             return@LaunchedEffect
         }
@@ -3511,8 +3512,9 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                         exoPlayer.playWhenReady = true
                     }
                 }
-                val hardTimeoutMs = (initialBufferingTimeoutMs + if (isHeavyStartupSource) 12_000L else 8_000L)
-                    .coerceAtMost(45_000L)
+                // Torrent embutido: até 150 s (achar pares e baixar as primeiras peças), em vez do limite de 45 s.
+                val hardTimeoutMs = if (isEmbeddedTorrent(uiState.selectedStream, uiState.selectedStreamUrl)) 150_000L
+                else (initialBufferingTimeoutMs + if (isHeavyStartupSource) 12_000L else 8_000L).coerceAtMost(45_000L)
                 if (!startupHardFailureReported && startupBufferDuration > hardTimeoutMs) {
                     playbackStartupDiag(
                         "hard startup timeout elapsedMs=$startupBufferDuration hardTimeoutMs=$hardTimeoutMs " +
@@ -7480,12 +7482,19 @@ internal fun buildPlaybackBufferProfile(
     )
 }
 
+/** Fonte P2P tocada pelo torrent embutido (pelo infoHash da fonte ou pelo endereço local). */
+private fun isEmbeddedTorrent(stream: StreamSource?, url: String?): Boolean =
+    !stream?.infoHash.isNullOrBlank() ||
+        com.arflix.tv.data.torrent.TorrentStream.isLocalUrl(url ?: stream?.url)
+
 private fun estimateInitialStartupTimeoutMs(
     stream: StreamSource?,
     isManualSelection: Boolean
 ): Long {
     var timeoutMs = if (isManualSelection) 12_000L else 6_000L
     if (stream == null) return timeoutMs
+    // Torrent embutido: achar pares e baixar as primeiras peças leva mais que um link direto.
+    if (isEmbeddedTorrent(stream, null)) return 60_000L
 
     val haystack = buildString {
         append(stream.quality)

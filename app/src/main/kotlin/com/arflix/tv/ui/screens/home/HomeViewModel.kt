@@ -1798,6 +1798,13 @@ class HomeViewModel @Inject constructor(
     private val categoryPaginationStates = ConcurrentHashMap<String, CategoryPaginationState>()
 
     init {
+        // Streaming Modes TV: addons pré-instalados (fileiras do modo Netflix + Torrentio) no primeiro uso do perfil.
+        viewModelScope.launch {
+            val added = runCatching { streamRepository.ensureStarterAddons() }
+                .onFailure { android.util.Log.w("StarterAddons", "falhou", it) }
+                .getOrDefault(false)
+            if (added) refresh()
+        }
         // A list edited through "Add to list" is shown fresh at once, not after the next reload.
         viewModelScope.launch {
             personalListsRepository.changes.collect { list -> reloadRowsFor(list.provider) }

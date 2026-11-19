@@ -1,3 +1,24 @@
+# Streaming Modes TV
+
+Versão do **ARVIO** para Fire Stick / Android TV, feita para o projeto [Streaming Modes](https://github.com/pabloruancoder/stremio-streaming-modes).
+
+**Baixar no Fire Stick (app Downloader):** `pabloruancoder.github.io/stremio-streaming-modes/tv`
+ou o `.apk` do [último Release](https://github.com/pabloruancoder/streaming-modes-tv/releases/latest).
+
+### O que muda em relação ao ARVIO
+
+Este repositório é um fork de [ProdigyV21/ARVIO](https://github.com/ProdigyV21/ARVIO) (Apache License 2.0). Arquivos modificados:
+
+- **Torrent embutido** (`app/src/main/kotlin/com/arflix/tv/data/torrent/TorrentStream.kt`, novo): fontes P2P dos addons (infoHash/magnet) tocam direto, com libtorrent4j e um servidor HTTP local, sem TorrServer nem debrid.
+- `StreamRepository.kt`: fontes P2P viram endereço local; addons pré-instalados em cada perfil novo.
+- `HomeViewModel.kt`: instala os addons pré-instalados no primeiro uso do perfil.
+- `PlayerScreen.kt`: mais tempo para o torrent começar; sem prévia de quadros em torrent.
+- `app/build.gradle.kts`, `proguard-rules.pro`: libtorrent4j e o tipo de build `fire` (pacote `com.arvio.tv.sm`, sem o Firebase do ARVIO).
+
+Build: `./gradlew :app:assembleSideloadFire` (precisa de `secrets.properties` com `TMDB_API_KEY` e de `keystore.properties`; veja os modelos na raiz).
+
+---
+
 <div align="center">
 
   <img src="web/public/arvio-logo.svg" alt="ARVIO" width="96" />

@@ -229,6 +229,23 @@ android {
             buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
         }
 
+        // Streaming Modes TV (Fire Stick / Android TV): otimizado como o release, com pacote próprio
+        // (instala ao lado do ARVIO oficial), assinado com a chave do projeto (keystore.properties) e sem
+        // relatórios de erro (o google-services.json do repositório é do Firebase do ARVIO, não nosso).
+        create("fire") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".sm"
+            versionNameSuffix = "-sm"
+            matchingFallbacks += "release"
+            isDebuggable = false
+            isJniDebuggable = false
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "false")
+            configure<CrashlyticsExtension> {
+                nativeSymbolUploadEnabled = false
+                mappingFileUploadEnabled = false
+            }
+        }
+
         // Beta build: release-grade optimizations in a separate package so it
         // can be tested alongside the Play Store installation.
         create("staging") {
@@ -412,6 +429,15 @@ ksp {
 
     // ExoPlayer / Media3 for video playback
     val media3Version = "1.9.0"
+    // Streaming Modes TV: torrent embutido (fontes P2P dos addons tocam sem TorrServer/debrid).
+    val libtorrent4jVersion = "2.1.0-39"
+    implementation("org.libtorrent4j:libtorrent4j:$libtorrent4jVersion")
+    implementation("org.libtorrent4j:libtorrent4j-android-arm:$libtorrent4jVersion")
+    implementation("org.libtorrent4j:libtorrent4j-android-arm64:$libtorrent4jVersion")
+    if (includeX86Abis) {
+        implementation("org.libtorrent4j:libtorrent4j-android-x86:$libtorrent4jVersion")
+        implementation("org.libtorrent4j:libtorrent4j-android-x86_64:$libtorrent4jVersion")
+    }
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
@@ -628,6 +654,14 @@ val validateReleaseCloudSecrets = tasks.register("validateReleaseCloudSecrets") 
         ) {
             "Release builds require real TRAKT_CLIENT_ID and TRAKT_CLIENT_SECRET values."
         }
+    }
+}
+
+// Build "fire" (Streaming Modes TV): não usa o Firebase do ARVIO (o pacote .sm nem está no google-services.json).
+// Com ENABLE_CRASH_REPORTING=false o app nunca chama o Crashlytics (CrashlyticsProvider confere a flag).
+tasks.configureEach {
+    if (name.endsWith("FireGoogleServices") || (name.contains("Crashlytics") && name.endsWith("Fire"))) {
+        enabled = false
     }
 }
 

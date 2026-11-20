@@ -379,6 +379,7 @@ class HomeViewModel @Inject constructor(
     private val tmdbPriorityDispatcher: TmdbPriorityDispatcher,
     private val catalogRepository: CatalogRepository,
     private val streamRepository: StreamRepository,
+    private val streamIntegrationRepository: com.arflix.tv.data.repository.StreamIntegrationRepository,
     private val sportsRepository: SportsRepository,
     private val traktRepository: TraktRepository,
     private val remoteSyncManager: com.arflix.tv.data.repository.sync.RemoteSyncManager,
@@ -1803,6 +1804,9 @@ class HomeViewModel @Inject constructor(
             val added = runCatching { streamRepository.ensureStarterAddons() }
                 .onFailure { android.util.Log.w("StarterAddons", "falhou", it) }
                 .getOrDefault(false)
+            // Ordem de prioridade dos addons (FenixFlix primeiro, depois torrents em português), uma vez por perfil.
+            runCatching { streamIntegrationRepository.applyStreamingModesOrderOnce() }
+                .onFailure { android.util.Log.w("StarterAddons", "ordem falhou", it) }
             if (added) refresh()
         }
         // A list edited through "Add to list" is shown fresh at once, not after the next reload.

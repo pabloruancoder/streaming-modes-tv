@@ -1627,6 +1627,18 @@ class PlayerViewModel @Inject constructor(
                 var autoplaySelected = false
                 var autoplayDeferredJob: Job? = null
                 var lastMergedStreams: List<StreamSource> = emptyList()
+                var lastProgressiveFinal = false
+                // Streaming Modes TV: o FenixFlix (prioridade 1) costuma responder depois do Torrentio.
+                // A escolha automática espera ele chegar (até PRIORITY_ADDON_WAIT_MS) em vez de pegar o
+                // primeiro torrent que aparece.
+                val PRIORITY_ADDON_WAIT_MS = 8_000L
+                val hasPriorityAddon = runCatching { streamRepository.installedAddons.first() }.getOrDefault(currentInstalledAddons).any { a ->
+                    a.isEnabled && (a.id.contains("fenix", true) || a.name.contains("fenix", true))
+                }
+                fun priorityAddonPending(streams: List<StreamSource>): Boolean =
+                    hasPriorityAddon && !lastProgressiveFinal &&
+                        System.currentTimeMillis() - collectionStartMs < PRIORITY_ADDON_WAIT_MS &&
+                        streams.none { com.arflix.tv.ui.screens.details.streamingModesTier(it) == 0 }
                 var isFirstEmission = true
                 var sourceEmptyReported = false
 
@@ -1668,6 +1680,7 @@ class PlayerViewModel @Inject constructor(
                         preferredLanguage
                     )
                     lastMergedStreams = mergedStreams
+                    lastProgressiveFinal = progressive.isFinal
                     val autoplayStreams = eligiblePlayerAutoplayStreams(mergedStreams, autoPlayMinimumQuality, autoPlayLimits)
 
                     val supplementalSourcesStillLoading =
@@ -1769,6 +1782,7 @@ class PlayerViewModel @Inject constructor(
                     ) {
                         autoplayDeferredJob = launch {
                             delay(AUTOPLAY_QUALITY_WINDOW_MS)
+                            while (!autoplaySelected && priorityAddonPending(lastMergedStreams)) delay(250L)
                             if (!autoplaySelected) {
                                 var snapshot = lastMergedStreams.ifEmpty { mergedStreams }
                                 if (hasHomeServerConnections &&
@@ -1799,9 +1813,10 @@ class PlayerViewModel @Inject constructor(
                     }
                     val autoplayTopStream = pickAutoplayTopStream(autoplayStreams, preferredLanguage)
                     val hasRequestedPreferredStream = hasRequestedPreferredStream(autoplayStreams)
+                    val waitingPriorityAddon = priorityAddonPending(mergedStreams)
                     val shouldSelectNow = !autoplaySelected && autoplayStreams.isNotEmpty() && canStartAutoplay() && homeServerReadyForAutoplay && (
                         recentAutoplayStream != null || (
-                            !holdForRecentSource && (
+                            !holdForRecentSource && !waitingPriorityAddon && (
                                 cacheHit ||
                                     progressive.isFinal ||
                                     hasCachedReadyStream ||
@@ -2980,6 +2995,10 @@ class PlayerViewModel @Inject constructor(
     ): List<StreamSource> {
         return streams.sortedWith(
             compareBy<StreamSource> { streamRepository.getPlaybackHostHealthPenalty(it) }
+                // Streaming Modes TV: FenixFlix → torrent em português (mais seeds) → resto.
+                .thenBy { com.arflix.tv.ui.screens.details.streamingModesTier(it) }
+                .thenByDescending { if (com.arflix.tv.ui.screens.details.isPortugueseStream(it)) 1 else 0 }
+                .thenByDescending { com.arflix.tv.ui.screens.details.torrentSeedTier(it) }
                 .thenBy { addonOrderIndex(it) }
                 .thenByDescending { qualityScoreForAutoPlay(it) }
                 .thenByDescending { parseSize(it.size) }

@@ -384,6 +384,45 @@ class StreamIntegrationRepository @Inject constructor(
         }
     }
 
+    /**
+     * Streaming Modes TV: põe os addons na ordem de prioridade do usuário uma vez por perfil
+     * (FenixFlix → Torrentio Brazuca/PT → Comet → Torrentio → BestCine/FrostStream → resto como estava).
+     * Depois disso a ordem é dele: mexendo nas configurações, não volta.
+     */
+    suspend fun applyStreamingModesOrderOnce(): Boolean {
+        val profileId = profileManager.getProfileId()
+        val doneKey = profileManager.profileBooleanKeyFor(profileId, "sm_provider_order_v1")
+        if (context.settingsDataStore.data.first()[doneKey] == true) return false
+        val addons = runCatching { streamRepositoryProvider.get().installedAddons.first() }.getOrDefault(emptyList())
+        val urlById = addons.associate { it.id to listOfNotNull(it.url, it.transportUrl, it.name).joinToString(" ").lowercase() }
+        fun rank(item: StreamProviderItem): Int {
+            if (!item.id.startsWith("stremio:")) return Int.MAX_VALUE
+            val text = urlById[item.id.removePrefix("stremio:")] ?: item.displayName.lowercase()
+            return when {
+                "fenix" in text && "qualities" in text -> 0
+                "fenix" in text -> 1
+                "torrentio" in text && "brazuca" in text -> 2
+                "torrentio" in text && "portuguese" in text -> 3
+                "comet" in text -> 4
+                "torrentio" in text -> 5
+                "bestcine" in text -> 6
+                "froststream" in text -> 7
+                else -> Int.MAX_VALUE
+            }
+        }
+        val items = observeProviderItems().first()
+        if (items.none { rank(it) < Int.MAX_VALUE }) return false // addons ainda não instalados: tenta na próxima
+        val ordered = items.withIndex()
+            .sortedWith(compareBy({ rank(it.value) }, { it.index }))
+            .map { it.value.id }
+        context.settingsDataStore.edit { prefs ->
+            prefs[providerOrderKey(profileId)] = ordered.joinToString(",")
+            prefs[doneKey] = true
+        }
+        android.util.Log.i("StarterAddons", "ordem aplicada: ${ordered.take(10)}")
+        return true
+    }
+
     suspend fun getProviderItems(): List<StreamProviderItem> {
         return observeProviderItems().first()
     }

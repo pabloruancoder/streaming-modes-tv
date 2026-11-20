@@ -96,6 +96,9 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
         // Hilt's generated super.onCreate injection here: it would start another sync,
         // player repository and analytics stack alongside the native worker.
         if (currentProcessName()?.endsWith(":seek_preview") == true) return
+        // Torrent embutido: guarda o contexto já na abertura, para a escolha automática de fonte saber o
+        // espaço livre e se a TV tem 4K antes do primeiro torrent tocar.
+        com.arflix.tv.data.torrent.TorrentStream.attach(this)
         val crashProcess = currentProcessName()?.endsWith(":crash") == true
         if (!crashProcess) DiagnosticsManager.initialize(this)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()

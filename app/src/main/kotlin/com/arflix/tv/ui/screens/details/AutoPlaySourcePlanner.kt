@@ -3,6 +3,7 @@ package com.arflix.tv.ui.screens.details
 import com.arflix.tv.data.model.isDirectStreamUrl
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.data.model.AutoplayLimits
+import com.arflix.tv.data.torrent.TorrentStream
 import java.util.Locale
 
 // Autoplay starts the best quality/size source it can find within ~2s. It keeps
@@ -59,6 +60,76 @@ internal fun matchesAutoplayLimits(stream: StreamSource, minimumQuality: Int, li
         val size = maxOf(autoPlaySizeBytes(stream), stream.behaviorHints?.videoSize ?: 0L)
         if (size <= 0L || size > limits.sizeBytes) return false
     }
+    if (!fitsEmbeddedTorrent(stream, quality)) return false
+    return true
+}
+
+/** Streaming Modes TV: fonte P2P tocada pelo torrent embutido (infoHash, sem debrid). */
+internal fun isEmbeddedTorrentStream(stream: StreamSource): Boolean =
+    !stream.infoHash.isNullOrBlank() || TorrentStream.isLocalUrl(stream.url)
+
+private val SEEDERS_REGEX = Regex("""👤\s*(\d+)""")
+
+/** Seeds informados pelo addon (Torrentio/Comet mostram "👤 123"); -1 quando não informa. */
+internal fun torrentSeeders(stream: StreamSource): Int {
+    val text = listOfNotNull(stream.description, stream.addonTitle, stream.rawLabel, stream.source).joinToString(" ")
+    return SEEDERS_REGEX.find(text)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+}
+
+/**
+ * Faixa de seeds para ordenar a escolha automática: entre torrents de mesma qualidade, o que tem gente
+ * enviando ganha do maior arquivo. Fontes que não são torrent ficam na faixa mais alta (não pioram).
+ */
+internal fun torrentSeedTier(stream: StreamSource): Int {
+    if (!isEmbeddedTorrentStream(stream)) return 3
+    val seeds = torrentSeeders(stream)
+    return when {
+        seeds < 0 -> 1
+        seeds >= 50 -> 3
+        seeds >= 15 -> 2
+        seeds >= 3 -> 1
+        else -> 0
+    }
+}
+
+private val PT_MARKERS = listOf(
+    "dublado", "dub ", "dual", "pt-br", "ptbr", "pt_br", "portugu", "nacional", "brazuca", "🇧🇷", "🇵🇹", "[pt]", " pt ", ".pt."
+)
+
+/** A fonte tem áudio em português (dublado/dual/bandeira do Brasil). */
+internal fun isPortugueseStream(stream: StreamSource): Boolean {
+    val text = listOfNotNull(
+        stream.source, stream.addonName, stream.description, stream.addonTitle, stream.rawLabel, stream.behaviorHints?.filename
+    ).joinToString(" ").lowercase(Locale.ROOT)
+    return PT_MARKERS.any { text.contains(it) }
+}
+
+private fun isFenixFlix(stream: StreamSource): Boolean =
+    stream.addonId.contains("fenix", true) || stream.addonName.contains("fenix", true)
+
+/**
+ * Prioridade do Streaming Modes TV na escolha automática (menor = primeiro):
+ * 0 FenixFlix · 1 torrent em português · 2 outras fontes diretas (http) · 3 outros torrents.
+ * Dentro de cada faixa: português primeiro, depois seeds, qualidade e tamanho.
+ */
+internal fun streamingModesTier(stream: StreamSource): Int = when {
+    isFenixFlix(stream) -> 0
+    isEmbeddedTorrentStream(stream) && isPortugueseStream(stream) -> 1
+    !isEmbeddedTorrentStream(stream) -> 2
+    else -> 3
+}
+
+/**
+ * A escolha automática só pega um torrent que o aparelho consegue tocar: cabe no espaço livre, não é 4K
+ * numa TV sem 4K, e tem seeds (quando o addon informa). Escolhido à mão, toca do mesmo jeito.
+ */
+private fun fitsEmbeddedTorrent(stream: StreamSource, quality: Int): Boolean {
+    if (!isEmbeddedTorrentStream(stream)) return true
+    val size = maxOf(autoPlaySizeBytes(stream), stream.sizeBytes ?: 0L, stream.behaviorHints?.videoSize ?: 0L)
+    if (size > 0L && size > TorrentStream.usableBytes()) return false
+    if (quality >= TOP_TIER_QUALITY_SCORE && !TorrentStream.supportsUhd()) return false
+    val seeds = torrentSeeders(stream)
+    if (seeds in 0..2) return false
     return true
 }
 
@@ -75,7 +146,10 @@ internal fun bestAutoPlayStream(
             // `notWebReady` HTTP sources (e.g. direct MKV rips) are fully playable on the
             // native ExoPlayer, so they are eligible; webReady only breaks ties at equal
             // quality+size so a known-simple URL wins a coin-flip.
-            compareByDescending<StreamSource> { qualityScoreForAutoPlay(it) }
+            compareBy<StreamSource> { streamingModesTier(it) }
+                .thenByDescending { if (isPortugueseStream(it)) 1 else 0 }
+                .thenByDescending { torrentSeedTier(it) }
+                .thenByDescending { qualityScoreForAutoPlay(it) }
                 .thenByDescending { autoPlaySizeBytes(it) }
                 .thenByDescending { if (it.behaviorHints?.notWebReady == true) 0 else 1 }
                 .thenByDescending { if (it.behaviorHints?.cached == true) 1 else 0 }

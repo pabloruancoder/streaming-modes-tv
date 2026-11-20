@@ -5810,8 +5810,74 @@ internal fun PlayerLoadingOverlay(
                         }
                     ?: uiState.streamLoadPhase?.localizedText()
             )
+
+            // Streaming Modes TV: qual fonte está carregando — addon + servidor de dentro dele
+            // (FenixFlix · Zeus, Torrentio · ThePirateBay) e qualidade/idioma/tamanho/seeds.
+            uiState.selectedStream?.takeIf { uiState.selectedStreamUrl != null }?.let { stream ->
+                val info = loadingSourceInfo(stream)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 56.dp, start = 32.dp, end = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = info.first,
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (info.second.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = info.second,
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
         }
     }
+}
+
+private val SOURCE_LANGUAGE_WORDS = setOf(
+    "dublado", "legendado", "dual", "dual audio", "nacional", "original", "multi", "pt-br", "ptbr", "português",
+    "portugues", "inglês", "ingles", "english", "leg", "dub"
+)
+
+/** Servidor/provedor de dentro do addon: "⚙️ ThePirateBay" (Torrentio) ou a última linha útil (FenixFlix: "⚡ Zeus"). */
+internal fun sourceServerName(stream: StreamSource): String? {
+    val text = listOfNotNull(stream.description, stream.addonTitle).firstOrNull { it.isNotBlank() } ?: return null
+    Regex("""⚙️?\s*([^\n👤💾]+)""").find(text)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
+    return text.lines()
+        .map { line -> line.trim().dropWhile { !it.isLetterOrDigit() }.trim() }
+        .filter { it.isNotBlank() && it.length <= 30 }
+        .filterNot { it.lowercase() in SOURCE_LANGUAGE_WORDS }
+        .filterNot { Regex("""(?i)^T\d+\s*E(P)?\d+""").containsMatchIn(it) || Regex("""(?i)^S\d+\s*E\d+""").containsMatchIn(it) }
+        .filterNot { Regex("""(?i)\d+(\.\d+)?\s*(GB|MB)""").containsMatchIn(it) }
+        .lastOrNull()
+        ?.takeIf { stream.addonName.isBlank() || !it.equals(stream.addonName, true) }
+}
+
+/** Linha 1: "FenixFlix · Zeus". Linha 2: "1080p · 🇧🇷 Português · 2.1 GB · 👤 120". */
+internal fun loadingSourceInfo(stream: StreamSource): Pair<String, String> {
+    val addon = stream.addonName.ifBlank { stream.source }.trim()
+    val server = sourceServerName(stream)
+    val first = if (server != null) "$addon · $server" else addon
+    val seeds = com.arflix.tv.ui.screens.details.torrentSeeders(stream)
+    val second = listOfNotNull(
+        stream.quality.takeIf { it.isNotBlank() && it != "-" },
+        "🇧🇷 Português".takeIf { com.arflix.tv.ui.screens.details.isPortugueseStream(stream) },
+        stream.size.takeIf { it.isNotBlank() && it != "-" },
+        "👤 $seeds".takeIf { seeds >= 0 },
+        "Torrent".takeIf { com.arflix.tv.ui.screens.details.isEmbeddedTorrentStream(stream) }
+    ).joinToString(" · ")
+    return first to second
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)

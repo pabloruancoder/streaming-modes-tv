@@ -128,6 +128,55 @@ object TorrentStream {
 
     private fun cacheRoot(): File = File(appContext!!.cacheDir, "torrents")
 
+    /**
+     * Na abertura do app: guarda o contexto e apaga o torrent que ficou da última vez (antes só era apagado
+     * quando outro torrent começava, e 2 GB parados no cache impediam até atualizar o app no Fire Stick).
+     */
+    fun attach(context: Context) {
+        if (appContext != null) return
+        appContext = context.applicationContext
+        Thread {
+            // Mesmo lock da sessão: um torrent aberto logo em seguida espera a limpeza terminar.
+            synchronized(lock) { if (session == null) runCatching { cacheRoot().deleteRecursively() } }
+        }.apply { isDaemon = true; name = "torrent-cache-cleanup" }.start()
+    }
+
+    @Volatile private var usableCache = 0L
+    @Volatile private var usableCacheAt = 0L
+    @Volatile private var uhdDisplay: Boolean? = null
+
+    /**
+     * Quanto um torrent novo pode ocupar: espaço livre + o torrent atual (é apagado ao trocar) − margem.
+     * Usado pela escolha automática de fonte para não pegar arquivos que não cabem (ex.: REMUX 4K de 90 GB
+     * num Fire Stick de 8 GB). Sem contexto ainda (servidor não iniciado) não limita.
+     */
+    fun usableBytes(): Long {
+        val ctx = appContext ?: return Long.MAX_VALUE
+        val now = System.currentTimeMillis()
+        if (now - usableCacheAt < 10_000L) return usableCache
+        val free = runCatching { ctx.cacheDir.usableSpace }.getOrDefault(Long.MAX_VALUE)
+        val inUse = runCatching {
+            cacheRoot().walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+        }.getOrDefault(0L)
+        usableCache = free + inUse - STORAGE_MARGIN_BYTES
+        usableCacheAt = now
+        return usableCache
+    }
+
+    /** A TV/aparelho tem saída 4K? (Fire TV Stick Lite e de 3ª geração são só 1080p.) Sem contexto: assume que sim. */
+    fun supportsUhd(): Boolean {
+        uhdDisplay?.let { return it }
+        val ctx = appContext ?: return true
+        val result = runCatching {
+            val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+            val display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+            display.supportedModes.any { maxOf(it.physicalWidth, it.physicalHeight) >= 3000 }
+        }.getOrDefault(true)
+        uhdDisplay = result
+        Log.i(TAG, "saída 4K: $result")
+        return result
+    }
+
     private fun ensureSession(): SessionManager = synchronized(lock) {
         session?.let { return it }
         // Restos de uma sessão anterior (o app foi fechado no meio): apaga tudo.

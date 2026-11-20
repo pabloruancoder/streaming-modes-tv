@@ -578,6 +578,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
     // a 10-second countdown lets the user stop watching or immediately Continue. On timeout we
     // advance to the next episode. Otherwise completion returns to the previous screen.
     var showNextEpisodePrompt by remember { mutableStateOf(false) }
+    // Aberto nos créditos (antes do fim): "Assistir créditos" só esconde o aviso e o episódio continua.
+    var nextPromptEarly by remember { mutableStateOf(false) }
     var pendingNextIdentity by remember { mutableStateOf<EpisodeIdentity?>(null) }
     var pendingNextAddonId by remember { mutableStateOf<String?>(null) }
     var pendingNextSourceName by remember { mutableStateOf<String?>(null) }
@@ -2366,7 +2368,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
     }
     val cancelNextEpisodePrompt: () -> Unit = {
         showNextEpisodePrompt = false
-        onExitPlayer()
+        if (nextPromptEarly) nextPromptEarly = false else onExitPlayer()
     }
     val playbackEpisodeKey = if (args.mediaType == MediaType.TV && args.seasonNumber != null && args.episodeNumber != null) {
         PlaybackEpisodeKey(args.mediaId, args.seasonNumber, args.episodeNumber,
@@ -2424,6 +2426,25 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
         },
         onFinish = finishPlayback,
     )
+    // Streaming Modes: "Próximo episódio" nos créditos, como na Netflix (antes só aparecia quando o vídeo acabava).
+    val creditsReached = shouldOfferNextEpisodeEarly(
+        isTv = args.mediaType == MediaType.TV, positionMs = currentPosition, durationMs = duration,
+        skip = uiState.activeSkipInterval
+    )
+    LaunchedEffect(creditsReached) {
+        if (!creditsReached || showNextEpisodePrompt || !isPlaying || !hasPlaybackStarted ||
+            nextEpisodeTransitionInProgress || showSourceMenu || showSubtitleMenu || !uiState.autoPlayNext) return@LaunchedEffect
+        val next = nextEpisodeIdentity ?: return@LaunchedEffect
+        if (!nextEpisodePromptGate.tryOpen(playbackEpisodeKey, true, nextEpisodeAirDateResolution)) return@LaunchedEffect
+        val selected = latestUiState.selectedStream
+        pendingNextIdentity = next
+        pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
+        pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
+        pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+        nextEpisodePromptButton = 0
+        nextPromptEarly = true
+        showNextEpisodePrompt = true
+    }
     DisposableEffect(exoPlayer, exitTransition) {
         val listener = object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -8306,4 +8327,22 @@ private fun guessCastMimeType(url: String): String = when {
     url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
     url.contains(".mpd", ignoreCase = true)  -> "application/dash+xml"
     else                                     -> "video/mp4"
+}
+
+
+/**
+ * Hora de oferecer o próximo episódio antes do fim (como a Netflix): no começo dos créditos quando a base de
+ * tempos traz o trecho de encerramento, senão nos últimos 40 s de um episódio com mais de 8 min.
+ */
+internal fun shouldOfferNextEpisodeEarly(
+    isTv: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    skip: com.arflix.tv.data.repository.SkipInterval?
+): Boolean {
+    if (!isTv || durationMs < 8 * 60_000L || positionMs <= 0L) return false
+    val remaining = durationMs - positionMs
+    if (remaining <= 3_000L) return false
+    val inOutro = skip != null && skip.type.lowercase() in setOf("outro", "ed", "mixed-ed") && positionMs in skip.startMs..skip.endMs
+    return inOutro || remaining <= 40_000L
 }

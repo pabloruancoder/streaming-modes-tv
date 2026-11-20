@@ -1580,4 +1580,13 @@
     <string name="phone_input_page_sent">Enviado ✓ — prima OK na TV.</string>
     <string name="phone_input_page_not_sent">Não enviado</string>
     <string name="phone_input_page_expired">Este código expirou — leia novamente o código QR na TV.</string>
+    <!-- Streaming Modes TV: página de serviço / modos -->
+    <string name="service_home_top10_series">Top 10 séries na %1$s hoje</string>
+    <string name="service_home_top10_movies">Top 10 filmes na %1$s hoje</string>
+    <string name="service_home_new">Novidades na %1$s</string>
+    <string name="service_home_originals">Originais %1$s</string>
+    <string name="service_home_top_rated_series">Séries aclamadas pela crítica</string>
+    <string name="service_home_top_rated_movies">Filmes aclamados pela crítica</string>
+    <string name="service_home_filter_all">Início</string>
+    <string name="service_home_filter_grid">Filtrar</string>
 </resources>

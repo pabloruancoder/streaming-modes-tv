@@ -226,6 +226,7 @@ class CollectionDetailsViewModel @Inject constructor(
         loadJob = collectionScope.launch {
             val baseCatalog = sportsRepository.sportsCollectionCatalog(normalizedCatalogId)
                 ?: catalogRepository.getCatalogs().firstOrNull { it.id == normalizedCatalogId || it.id == catalogId }
+                ?: com.arflix.tv.data.modes.StreamingModes.catalogFor(normalizedCatalogId)
                 ?: syntheticTmdbCollectionCatalog(normalizedCatalogId)
             ensureCurrentLoad(generation)
             val filter = ServiceHome.Filter.entries.firstOrNull { it.name == serviceFilter } ?: ServiceHome.Filter.ALL

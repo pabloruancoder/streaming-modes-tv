@@ -79,13 +79,19 @@ import kotlinx.coroutines.launch
  * A streaming-service page drawn like the Netflix-style TV Home (see [ServiceHome]): the big
  * card, then rows that all come from the service. TV only; touch devices keep the grid.
  */
+/** Botão extra no cabeçalho (Streaming Modes: Buscar, Minha lista, Modo, Configurações). */
+internal data class ServiceHeaderAction(val label: String, val icon: ImageVector?, val onClick: () -> Unit)
+
 @Composable
 internal fun ServiceHomeScreen(
     service: CatalogConfig,
     onOpen: (item: MediaItem, play: Boolean) -> Unit,
     onViewAll: (ServiceHome.ViewAll) -> Unit,
     onBack: () -> Unit,
-    viewModel: ServiceHomeViewModel = hiltViewModel()
+    viewModel: ServiceHomeViewModel = hiltViewModel(),
+    headerActions: List<ServiceHeaderAction> = emptyList(),
+    titleColor: Color = Color.White,
+    titleText: String? = null
 ) {
     LaunchedEffect(service.id) { viewModel.load(service) }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -105,7 +111,8 @@ internal fun ServiceHomeScreen(
         cardLogoUrls = cardLogoUrls, trailerSettings = trailerSettings,
         onFocus = viewModel::focus, onPreloadLogos = viewModel::preloadLogos,
         onFilter = viewModel::selectFilter, onRetry = viewModel::retry,
-        onOpen = onOpen, onViewAll = onViewAll, onBack = onBack
+        onOpen = onOpen, onViewAll = onViewAll, onBack = onBack,
+        headerActions = headerActions, titleColor = titleColor, titleText = titleText
     )
 }
 
@@ -133,7 +140,10 @@ internal fun ServiceHomeContent(
     onRetry: () -> Unit,
     onOpen: (MediaItem, Boolean) -> Unit,
     onViewAll: (ServiceHome.ViewAll) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    headerActions: List<ServiceHeaderAction> = emptyList(),
+    titleColor: Color = Color.White,
+    titleText: String? = null
 ) {
     // Saved like Home's, so returning from a title lands on the card it was opened from.
     val focusState = rememberSaveable(service.id, saver = HomeFocusState.Saver) {
@@ -223,6 +233,26 @@ internal fun ServiceHomeContent(
                 if ((key == ServiceHomeKey.SELECT || key == ServiceHomeKey.BACK) && event.nativeKeyEvent.repeatCount > 0) {
                     return@onPreviewKeyEvent true
                 }
+                // Botões extras do cabeçalho, depois do botão Filtro.
+                if (headerActions.isNotEmpty() && focusState.isSidebarFocused) {
+                    val idx = focusState.sidebarFocusIndex
+                    val last = SERVICE_HOME_GRID_BUTTON_INDEX + headerActions.size
+                    val forward = if (isRtl) ServiceHomeKey.LEFT else ServiceHomeKey.RIGHT
+                    val backward = if (isRtl) ServiceHomeKey.RIGHT else ServiceHomeKey.LEFT
+                    when {
+                        key == forward && idx >= SERVICE_HOME_GRID_BUTTON_INDEX && idx < last -> {
+                            focusState.sidebarFocusIndex = idx + 1; return@onPreviewKeyEvent true
+                        }
+                        key == backward && idx > SERVICE_HOME_GRID_BUTTON_INDEX -> {
+                            focusState.sidebarFocusIndex = idx - 1; return@onPreviewKeyEvent true
+                        }
+                        key == forward && idx >= last -> return@onPreviewKeyEvent true
+                        key == ServiceHomeKey.SELECT && idx > SERVICE_HOME_GRID_BUTTON_INDEX -> {
+                            headerActions.getOrNull(idx - SERVICE_HOME_GRID_BUTTON_INDEX - 1)?.onClick?.invoke()
+                            return@onPreviewKeyEvent true
+                        }
+                    }
+                }
                 when (val action = handleServiceHomeKey(
                     key, focusState, categories, hasMore, billboard, isRtl, SystemClock.elapsedRealtime(), state.filter,
                     canRetry = showEmpty
@@ -242,7 +272,9 @@ internal fun ServiceHomeContent(
             }
     ) {
         ServiceHomeHeader(
-            serviceName = service.title,
+            serviceName = titleText ?: service.title,
+            titleColor = titleColor,
+            actions = headerActions,
             selected = state.filter,
             focusedIndex = focusState.sidebarFocusIndex.takeIf { focusState.isSidebarFocused },
             modifier = Modifier
@@ -331,6 +363,8 @@ internal fun serviceRowTitle(rowId: String, service: String): String = when (row
 @Composable
 private fun ServiceHomeHeader(
     serviceName: String,
+    titleColor: Color = Color.White,
+    actions: List<ServiceHeaderAction> = emptyList(),
     selected: ServiceHome.Filter,
     focusedIndex: Int?,
     modifier: Modifier = Modifier
@@ -348,7 +382,7 @@ private fun ServiceHomeHeader(
                 fontWeight = FontWeight.Bold,
                 textDirection = TextDirection.Content
             ),
-            color = Color.White,
+            color = titleColor,
             maxLines = 1
         )
         Spacer(Modifier.width(18.dp))
@@ -372,6 +406,17 @@ private fun ServiceHomeHeader(
             isFocused = focusedIndex == SERVICE_HOME_GRID_BUTTON_INDEX,
             icon = Icons.Default.Tune
         )
+        if (actions.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            actions.forEachIndexed { i, action ->
+                ServiceHomeFilterButton(
+                    label = action.label,
+                    isSelected = false,
+                    isFocused = focusedIndex == SERVICE_HOME_GRID_BUTTON_INDEX + 1 + i,
+                    icon = action.icon
+                )
+            }
+        }
     }
 }
 
@@ -401,10 +446,10 @@ private fun ServiceHomeFilterButton(
         val color = if (isFocused) Color.Black else Color.White
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) {
-                Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
+                Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(if (label.isEmpty()) 22.dp else 18.dp))
+                if (label.isNotEmpty()) Spacer(Modifier.width(8.dp))
             }
-            Text(
+            if (label.isNotEmpty()) Text(
                 text = label,
                 style = ArflixTypography.label.copy(fontSize = 17.sp, fontWeight = FontWeight.SemiBold),
                 color = color,

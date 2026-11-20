@@ -25,6 +25,8 @@ import com.arflix.tv.ui.components.LocalBottomBarHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.lifecycle.Lifecycle
@@ -297,6 +299,47 @@ fun AppNavigation(
 
         // Home screen
         composable(Screen.Home.route) {
+          // Streaming Modes: ☰ no controle abre o seletor de modo; com um modo ativo, a Home é a do serviço.
+          val modeSelection by com.arflix.tv.data.modes.StreamingModes.selection.collectAsState()
+          val activeMode = com.arflix.tv.data.modes.StreamingModes.modeFor(currentProfile?.id, modeSelection)
+          var showModePicker by remember { mutableStateOf(false) }
+          val modeContext = androidx.compose.ui.platform.LocalContext.current
+          androidx.compose.foundation.layout.Box(
+              androidx.compose.ui.Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
+                  if (ev.key == androidx.compose.ui.input.key.Key.Menu) {
+                      if (ev.type == androidx.compose.ui.input.key.KeyEventType.KeyDown) showModePicker = true
+                      true
+                  } else false
+              }
+          ) {
+          if (activeMode != null) {
+            NavigationRailScreen(navigationRailInset, bottomInset = navigationRailBottomInset) {
+                com.arflix.tv.ui.screens.modes.StreamingModeHome(
+                    mode = activeMode,
+                    onOpen = { item, play ->
+                        navController.navigate(Screen.Details.createRoute(item.mediaType, item.id, null, null, play))
+                    },
+                    onViewAll = { catalog, viewAll ->
+                        navController.navigate(Screen.CollectionDetails.createGridRoute(catalog.id, viewAll.rowId, viewAll.filter.name))
+                    },
+                    onSearch = {
+                        if (activeMode.key == com.arflix.tv.data.modes.StreamingModes.NETFLIX.key) navController.navigate("nf_search")
+                        else navigateTopLevel(Screen.Search.route)
+                    },
+                    onMyList = {
+                        if (activeMode.key == com.arflix.tv.data.modes.StreamingModes.NETFLIX.key) navController.navigate("nf_mylist")
+                        else navigateTopLevel(Screen.Watchlist.route)
+                    },
+                    onSettings = { navigateTopLevel(Screen.Settings.route) },
+                    onPickMode = { showModePicker = true },
+                    onBack = onExitApp,
+                    onSwitchProfile = {
+                        onSwitchProfile()
+                        navController.navigateToProfileSelection()
+                    }
+                )
+            }
+          } else
             NavigationRailScreen(navigationRailInset, bottomInset = navigationRailBottomInset) {
               CalendarIdlePreload(calendarViewModel, currentProfile?.id) {
                 val upcoming by calendarViewModel.homeUpcomingItems.collectAsState()
@@ -360,6 +403,31 @@ fun AppNavigation(
                 )
               }
             }
+          if (showModePicker) {
+              com.arflix.tv.ui.screens.modes.StreamingModePicker(
+                  current = activeMode,
+                  onPick = { picked ->
+                      com.arflix.tv.data.modes.StreamingModes.select(modeContext, currentProfile?.id, picked)
+                      showModePicker = false
+                  },
+                  onDismiss = { showModePicker = false }
+              )
+          }
+          }
+        }
+
+        // Streaming Modes (Netflix): busca e Minha lista no estilo do app da Netflix.
+        composable("nf_search") {
+            com.arflix.tv.ui.screens.modes.NetflixSearchScreen(
+                onOpen = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable("nf_mylist") {
+            com.arflix.tv.ui.screens.modes.NetflixMyListScreen(
+                onOpen = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
+                onBack = { navController.popBackStack() }
+            )
         }
 
         // Search screen
@@ -643,6 +711,41 @@ fun AppNavigation(
             val autoPlayHandled = backStackEntry.savedStateHandle.get<Boolean>("autoPlayHandled") ?: false
             val autoPlay = autoPlayArg && !autoPlayHandled
             val mediaType = if (mediaTypeStr == "tv") MediaType.TV else MediaType.MOVIE
+
+            // Streaming Modes: no modo Netflix, a página do título também é no estilo Netflix.
+            val titleModeSelection by com.arflix.tv.data.modes.StreamingModes.selection.collectAsState()
+            val titleMode = com.arflix.tv.data.modes.StreamingModes.modeFor(currentProfile?.id, titleModeSelection)
+            if (titleMode?.key == com.arflix.tv.data.modes.StreamingModes.NETFLIX.key) {
+                com.arflix.tv.ui.screens.modes.NetflixTitleScreen(
+                    mediaType = mediaType,
+                    mediaId = mediaId,
+                    initialSeason = initialSeason,
+                    initialEpisode = initialEpisode,
+                    autoPlay = autoPlay,
+                    onAutoPlayHandled = { backStackEntry.savedStateHandle["autoPlayHandled"] = true },
+                    onPlay = { identity, imdbId, startPositionMs ->
+                        navController.navigate(
+                            Screen.Player.createRoute(
+                                mediaType = mediaType,
+                                mediaId = mediaId,
+                                seasonNumber = identity?.displaySeason,
+                                episodeNumber = identity?.displayEpisode,
+                                tmdbSeasonNumber = identity?.tmdbSeason,
+                                tmdbEpisodeNumber = identity?.tmdbEpisode,
+                                kitsuId = identity?.kitsuId,
+                                kitsuEpisodeNumber = identity?.kitsuEpisode,
+                                imdbId = imdbId,
+                                startPositionMs = startPositionMs
+                            )
+                        ) {
+                            if (autoPlayArg) popUpTo(Screen.Details.route) { inclusive = true }
+                        }
+                    },
+                    onOpenTitle = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
+                    onBack = { navController.popBackStack() }
+                )
+                return@composable
+            }
 
             DetailsScreen(
                 onFullscreenChanged = onOverlayFullscreenChanged,

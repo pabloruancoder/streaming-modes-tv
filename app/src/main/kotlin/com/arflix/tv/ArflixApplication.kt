@@ -100,6 +100,7 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
         // espaço livre e se a TV tem 4K antes do primeiro torrent tocar.
         com.arflix.tv.data.torrent.TorrentStream.attach(this)
         com.arflix.tv.data.embed.EmbedSources.attach(this)
+        com.arflix.tv.data.modes.StreamingModes.attach(this)
         val crashProcess = currentProcessName()?.endsWith(":crash") == true
         if (!crashProcess) DiagnosticsManager.initialize(this)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()

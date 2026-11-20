@@ -115,6 +115,8 @@ internal fun NetflixSearchScreen(
     // Linha 0 = [espaço, apagar]; depois as teclas em 6 colunas.
     var keyIndex by rememberSaveable { mutableIntStateOf(2) }
     var termIndex by rememberSaveable { mutableIntStateOf(0) }
+    // De onde veio para a grade (volta para lá com ←).
+    var leftZone by rememberSaveable { mutableStateOf(Zone.KEYS) }
     var secIndex by rememberSaveable { mutableIntStateOf(0) }
     var itemIndex by rememberSaveable { mutableIntStateOf(0) }
 
@@ -185,7 +187,7 @@ internal fun NetflixSearchScreen(
                             when {
                                 keyIndex == 0 -> keyIndex = 1
                                 keyIndex == 1 || (keyIndex >= 2 && colOf(keyIndex) == KB_COLS - 1) || keyIndex == KB_KEYS.size - 1 ->
-                                    if (terms.isNotEmpty()) zone = Zone.TERMS else enterGrid()
+                                    { leftZone = Zone.KEYS; enterGrid() }
                                 else -> keyIndex++
                             }
                             true
@@ -199,11 +201,12 @@ internal fun NetflixSearchScreen(
                             true
                         }
                         Key.DirectionDown -> {
-                            keyIndex = when {
-                                keyIndex == 0 -> 2
-                                keyIndex == 1 -> 5
-                                keyIndex + KB_COLS < KB_KEYS.size -> keyIndex + KB_COLS
-                                else -> keyIndex
+                            when {
+                                keyIndex == 0 -> keyIndex = 2
+                                keyIndex == 1 -> keyIndex = 5
+                                keyIndex + KB_COLS < KB_KEYS.size -> keyIndex += KB_COLS
+                                // Última fileira do teclado: desce para as categorias/sugestões.
+                                terms.isNotEmpty() -> { zone = Zone.TERMS; termIndex = 0 }
                             }
                             true
                         }
@@ -212,10 +215,10 @@ internal fun NetflixSearchScreen(
                         else -> false
                     }
                     Zone.TERMS -> when (ev.key) {
-                        Key.DirectionUp -> { if (termIndex > 0) termIndex--; true }
+                        Key.DirectionUp -> { if (termIndex > 0) termIndex-- else zone = Zone.KEYS; true }
                         Key.DirectionDown -> { if (termIndex < terms.size - 1) termIndex++; true }
-                        Key.DirectionLeft -> { zone = Zone.KEYS; true }
-                        Key.DirectionRight -> { enterGrid(); true }
+                        Key.DirectionLeft -> true
+                        Key.DirectionRight -> { leftZone = Zone.TERMS; enterGrid(); true }
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { terms.getOrNull(termIndex)?.let { setQuery(it) }; true }
                         Key.Back -> { zone = Zone.KEYS; true }
                         else -> false
@@ -224,7 +227,7 @@ internal fun NetflixSearchScreen(
                         val items = sections.getOrNull(secIndex)?.items.orEmpty()
                         when (ev.key) {
                             Key.DirectionLeft -> {
-                                if (itemIndex % COLS == 0) zone = if (terms.isNotEmpty()) Zone.TERMS else Zone.KEYS else itemIndex--
+                                if (itemIndex % COLS == 0) zone = if (leftZone == Zone.TERMS && terms.isNotEmpty()) Zone.TERMS else Zone.KEYS else itemIndex--
                                 true
                             }
                             Key.DirectionRight -> { if (itemIndex % COLS < COLS - 1 && itemIndex + 1 < items.size) itemIndex++; true }
@@ -280,21 +283,21 @@ internal fun NetflixSearchScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                 }
-            }
-            Spacer(Modifier.width(18.dp))
-            // Categorias / sugestões
-            Column(Modifier.width(150.dp)) {
+                Spacer(Modifier.height(10.dp))
+                // Categorias / sugestões, embaixo do teclado (como na Netflix)
+                Column(Modifier.weight(1f)) {
                 if (termsLabel.isNotEmpty()) {
                     Text(termsLabel, color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                 }
                 val termsState = rememberLazyListState()
-                LaunchedEffect(termIndex, zone) { if (zone == Zone.TERMS) termsState.animateScrollToItem((termIndex - 3).coerceAtLeast(0)) }
+                LaunchedEffect(termIndex, zone) { if (zone == Zone.TERMS) termsState.animateScrollToItem((termIndex - 1).coerceAtLeast(0)) }
                 LazyColumn(state = termsState, userScrollEnabled = false) {
                     itemsIndexed(terms, key = { _, t -> t }) { i, t -> TermItem(t, query, focused = zone == Zone.TERMS && i == termIndex) }
                 }
+                }
             }
-            Spacer(Modifier.width(18.dp))
+            Spacer(Modifier.width(28.dp))
             // Capas
             Box(Modifier.weight(1f)) {
                 when {

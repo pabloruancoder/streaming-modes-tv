@@ -1,111 +1,154 @@
 package com.arflix.tv.ui.screens.modes
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.arflix.tv.data.model.CatalogConfig
-import com.arflix.tv.data.model.CatalogKind
-import com.arflix.tv.data.model.CatalogSourceType
-import com.arflix.tv.data.model.CollectionGroupKind
-import com.arflix.tv.data.model.CollectionSourceConfig
-import com.arflix.tv.data.model.CollectionSourceKind
-import com.arflix.tv.data.model.MediaItem
-import com.arflix.tv.data.modes.StreamingModes
-import com.arflix.tv.data.repository.MediaRepository
-import com.arflix.tv.ui.screens.collections.ServiceHome
+import com.arflix.tv.data.api.TmdbApi
+import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.util.Constants
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 
-/** Uma aba da tela "Novidades e populares". */
-internal data class NewPopularTab(val key: String, val label: String, val items: List<MediaItem> = emptyList(),
-                                  val loading: Boolean = true, val ranked: Boolean = false, val upcoming: Boolean = false)
+/** Título das fileiras de "Novidades e populares" (dados do addon Streaming Modes, como no PC). */
+internal data class NPItem(
+    val imdbId: String,
+    val movie: Boolean,
+    val name: String,
+    val description: String = "",
+    val background: String? = null,
+    val poster: String? = null,
+    val logo: String? = null,
+    val genres: List<String> = emptyList(),
+    val year: String = "",
+    /** Estreias: AAAA-MM-DD. */
+    val date: String? = null,
+    val kind: String? = null
+) {
+    val daysUntil: Long? get() = date?.let { runCatching { ChronoUnit.DAYS.between(LocalDate.now(), LocalDate.parse(it.take(10))) }.getOrNull() }
+    /** Ainda não estreou (não dá para assistir). */
+    val upcoming: Boolean get() = (daysUntil ?: -1) > 0
+}
+
+internal data class NPRow(val id: String, val title: String, val items: List<NPItem>, val ranked: Boolean = false, val upcoming: Boolean = false)
 
 /**
- * "Novidades e populares" da Netflix (como no app de TV e no plugin do PC): Novidades, Top 10 séries,
- * Top 10 filmes e Em breve, só com o catálogo da Netflix Brasil.
+ * "Novidades e populares" igual à do plugin do PC: fileiras Novidades na Netflix, Chegando esta semana,
+ * Top 10 séries no Brasil esta semana, Chegando na próxima semana, Top 10 filmes, Vale a espera e Bombando agora.
+ * Os dados vêm do addon publicado no GitHub Pages (Top 10 oficial e estreias com data e sinopse em português).
  */
 @HiltViewModel
 internal class NetflixNewPopularViewModel @Inject constructor(
-    private val mediaRepository: MediaRepository
+    @ApplicationContext private val context: Context,
+    private val tmdbApi: TmdbApi
 ) : ViewModel() {
-    private val _tabs = MutableStateFlow(
-        listOf(
-            NewPopularTab("new", "🍿 Novidades"),
-            NewPopularTab("top_series", "🔟 Top 10 séries", ranked = true),
-            NewPopularTab("top_movies", "🔟 Top 10 filmes", ranked = true),
-            NewPopularTab("soon", "🔜 Em breve", upcoming = true)
-        )
-    )
-    val tabs: StateFlow<List<NewPopularTab>> = _tabs.asStateFlow()
+    private val _rows = MutableStateFlow<List<NPRow>>(emptyList())
+    val rows: StateFlow<List<NPRow>> = _rows.asStateFlow()
+    private val _loading = MutableStateFlow(true)
+    val loading: StateFlow<Boolean> = _loading.asStateFlow()
+    private val prefs = context.getSharedPreferences("streaming_modes", Context.MODE_PRIVATE)
+    private val _reminders = MutableStateFlow(prefs.getStringSet("nf_reminders", emptySet()).orEmpty())
+    val reminders: StateFlow<Set<String>> = _reminders.asStateFlow()
     private var loaded = false
 
-    fun load(mode: StreamingModes.Mode) {
+    fun load() {
         if (loaded) return
         loaded = true
-        val today = LocalDate.now()
-        val service = StreamingModes.catalog(mode)
-        val rows = ServiceHome.rows(service, today)
-        fun rowCatalog(id: String) = rows.firstOrNull { it.id == id }?.catalog
-        load("new", rowCatalog(ServiceHome.NEW_ROW_ID), 30)
-        load("top_series", rowCatalog(ServiceHome.TOP10_SERIES_ROW_ID), 10)
-        load("top_movies", rowCatalog(ServiceHome.TOP10_MOVIES_ROW_ID), 10)
-        load("soon", comingSoon(mode, today), 30)
+        viewModelScope.launch {
+            val recentS = async { catalog("series", "netflix.recent-series") }
+            val recentM = async { catalog("movie", "netflix.recent-movies") }
+            val topS = async { catalog("series", "netflix.top10-series") }
+            val topM = async { catalog("movie", "netflix.top10-movies") }
+            val trendS = async { catalog("series", "netflix.trending-series") }
+            val trendM = async { catalog("movie", "netflix.trending-movies") }
+            val soon = async { upcoming() }
+            val up = soon.await()
+            fun upRow(id: String, title: String, test: (Long) -> Boolean) =
+                NPRow(id, title, up.filter { it.daysUntil?.let(test) == true }, upcoming = true)
+            _rows.value = listOf(
+                NPRow("new", "Novidades na Netflix", interleave(recentS.await(), recentM.await())),
+                upRow("week", "Chegando esta semana") { it in 0..7 },
+                NPRow("top_s", "Top 10 séries no Brasil esta semana", topS.await().take(10), ranked = true),
+                upRow("next", "Chegando na próxima semana") { it in 8..14 },
+                NPRow("top_m", "Top 10 filmes no Brasil esta semana", topM.await().take(10), ranked = true),
+                upRow("later", "Vale a espera") { it > 14 },
+                NPRow("trend", "Bombando agora", interleave(trendS.await(), trendM.await()).take(40))
+            ).filter { it.items.isNotEmpty() }
+            _loading.value = false
+        }
     }
 
-    /** Estreias: séries originais do serviço com primeira exibição a partir de amanhã (TMDB). */
-    private fun comingSoon(mode: StreamingModes.Mode, today: LocalDate): CatalogConfig? {
-        val network = when (mode.key) {
-            "netflix" -> "213"
-            "disney" -> "2739"
-            "apple" -> "2552"
-            "prime" -> "1024"
-            "max" -> "3186|49"
-            else -> return null
-        }
-        return CatalogConfig(
-            id = "sm_soon_${mode.key}",
-            title = "Em breve",
-            sourceType = CatalogSourceType.PREINSTALLED,
-            isPreinstalled = true,
-            kind = CatalogKind.COLLECTION,
-            collectionGroup = CollectionGroupKind.SERVICE,
-            collectionSources = listOf(
-                CollectionSourceConfig(
-                    kind = CollectionSourceKind.TMDB_DISCOVER,
-                    mediaType = "series",
-                    sortBy = "first_air_date.asc",
-                    discoverParams = mapOf(
-                        "with_networks" to network,
-                        "first_air_date.gte" to today.plusDays(1).toString(),
-                        "first_air_date.lte" to today.plusMonths(4).toString()
-                    )
-                )
-            )
+    fun toggleReminder(item: NPItem) {
+        val next = _reminders.value.toMutableSet().apply { if (!add(item.imdbId)) remove(item.imdbId) }
+        prefs.edit().putStringSet("nf_reminders", next).apply()
+        _reminders.value = next
+    }
+
+    /** IMDb → TMDB (o app abre títulos pelo id do TMDB). */
+    suspend fun resolve(item: NPItem): Pair<MediaType, Int>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val r = tmdbApi.findByExternalId(item.imdbId, Constants.TMDB_API_KEY, "imdb_id")
+            if (item.movie) r.movieResults.firstOrNull()?.let { MediaType.MOVIE to it.id } ?: r.tvResults.firstOrNull()?.let { MediaType.TV to it.id }
+            else r.tvResults.firstOrNull()?.let { MediaType.TV to it.id } ?: r.movieResults.firstOrNull()?.let { MediaType.MOVIE to it.id }
+        }.getOrNull()
+    }
+
+    private fun interleave(a: List<NPItem>, b: List<NPItem>): List<NPItem> = buildList {
+        for (i in 0 until maxOf(a.size, b.size)) { a.getOrNull(i)?.let(::add); b.getOrNull(i)?.let(::add) }
+    }.distinctBy { it.imdbId }
+
+    private suspend fun catalog(type: String, id: String): List<NPItem> =
+        fetch("$PAGES/catalog/$type/$id.json")?.optJSONArray("metas")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.toItem(type == "movie") }
+        }.orEmpty()
+
+    private suspend fun upcoming(): List<NPItem> =
+        fetch("$PAGES/sm/upcoming/netflix.json")?.optJSONArray("items")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> o.toItem(o.optString("type") == "movie") } }
+        }.orEmpty().filter { (it.daysUntil ?: -1) >= 0 }.sortedBy { it.date }
+
+    private fun JSONObject.toItem(movie: Boolean): NPItem? {
+        val id = optString("id").takeIf { it.startsWith("tt") } ?: return null
+        val genres = optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.optString(it) } }.orEmpty()
+        return NPItem(
+            imdbId = id, movie = movie, name = optString("name"),
+            description = optString("description"),
+            background = optString("background").ifBlank { null },
+            poster = optString("poster").ifBlank { null },
+            logo = optString("logo").ifBlank { null },
+            genres = genres,
+            year = optString("releaseInfo"),
+            date = optString("date").ifBlank { null },
+            kind = optString("kind").ifBlank { null }
         )
     }
 
-    private fun load(key: String, catalog: CatalogConfig?, limit: Int) {
-        if (catalog == null) { update(key, emptyList()); return }
-        viewModelScope.launch {
-            val items = try {
-                mediaRepository.loadCollectionCatalogPage(catalog, offset = 0, limit = limit).items
-                    .filter { it.id > 0 }.distinctBy { it.mediaType to it.id }.take(limit)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                emptyList()
-            }
-            update(key, items)
+    private suspend fun fetch(url: String): JSONObject? = withContext(Dispatchers.IO) {
+        try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 10_000; c.readTimeout = 15_000
+            c.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun update(key: String, items: List<MediaItem>) {
-        _tabs.update { tabs -> tabs.map { if (it.key == key) it.copy(items = items, loading = false) else it } }
+    companion object {
+        const val PAGES = "https://pabloruancoder.github.io/stremio-streaming-modes"
     }
 }

@@ -244,7 +244,10 @@ fun AppNavigation(
     val calendarViewModel: ReleaseCalendarViewModel = hiltViewModel()
     // Live TV carries no age ratings: a kids profile loses the tab and every way into it.
     val isKidsProfile = currentProfile?.isKidsProfile == true
-    SideEffect { KidsNavigation.hideLiveTv = isKidsProfile }
+    SideEffect {
+        KidsNavigation.hideLiveTv = isKidsProfile
+        com.arflix.tv.data.modes.StreamingModes.currentProfileId = currentProfile?.id
+    }
     val navigateTopLevel: (String) -> Unit = navigate@{ route ->
         if (isKidsProfile && route.substringBefore('?') == "tv") return@navigate
         navController.navigate(route) {
@@ -740,6 +743,26 @@ fun AppNavigation(
                         ) {
                             if (autoPlayArg) popUpTo(Screen.Details.route) { inclusive = true }
                         }
+                    },
+                    onPlayStream = { identity, imdbId, startPositionMs, stream ->
+                        navController.navigate(
+                            Screen.Player.createRoute(
+                                mediaType = mediaType,
+                                mediaId = mediaId,
+                                seasonNumber = identity?.displaySeason,
+                                episodeNumber = identity?.displayEpisode,
+                                tmdbSeasonNumber = identity?.tmdbSeason,
+                                tmdbEpisodeNumber = identity?.tmdbEpisode,
+                                kitsuId = identity?.kitsuId,
+                                kitsuEpisodeNumber = identity?.kitsuEpisode,
+                                imdbId = imdbId,
+                                streamUrl = stream.url,
+                                preferredAddonId = stream.addonId.takeIf { it.isNotBlank() },
+                                preferredSourceName = stream.source.takeIf { it.isNotBlank() },
+                                preferredBingeGroup = stream.behaviorHints?.bingeGroup,
+                                startPositionMs = startPositionMs
+                            )
+                        )
                     },
                     onOpenTitle = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
                     onBack = { navController.popBackStack() }

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.ViewModule
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -79,7 +80,7 @@ import kotlinx.coroutines.delay
 
 private val NRed = Color(0xFFE50914)
 
-private enum class TitlePane { MAIN, EPISODES, SIMILAR }
+private enum class TitlePane { MAIN, EPISODES, SIMILAR, SOURCES }
 
 private data class TitleAction(val label: String, val icon: ImageVector, val run: () -> Unit, val progress: Float? = null)
 
@@ -98,6 +99,8 @@ internal fun NetflixTitleScreen(
     autoPlay: Boolean,
     onAutoPlayHandled: () -> Unit,
     onPlay: (identity: EpisodeIdentity?, imdbId: String?, startPositionMs: Long?) -> Unit,
+    /** Tocar uma fonte escolhida à mão (botão "Escolher fonte"). */
+    onPlayStream: (identity: EpisodeIdentity?, imdbId: String?, startPositionMs: Long?, stream: com.arflix.tv.data.model.StreamSource) -> Unit = { _, _, _, _ -> },
     onOpenTitle: (MediaType, Int) -> Unit,
     onBack: () -> Unit,
     viewModel: DetailsViewModel = hiltViewModel()
@@ -149,6 +152,7 @@ internal fun NetflixTitleScreen(
     var seasonIndex by rememberSaveable { mutableIntStateOf(0) }
     var similarIndex by rememberSaveable { mutableIntStateOf(0) }
     var pendingEpisode by rememberSaveable { mutableIntStateOf(1) }
+    var sourceIndex by rememberSaveable { mutableIntStateOf(0) }
     // Quando a temporada pedida chega, posiciona no episódio onde parou.
     LaunchedEffect(state.currentSeason, state.episodes.size) {
         if (pane == TitlePane.EPISODES && state.episodes.isNotEmpty()) {
@@ -177,6 +181,10 @@ internal fun NetflixTitleScreen(
         if (resumeMs != null) add(TitleAction("Começar do início", Icons.Default.Replay, ::playFromStart))
         add(TitleAction(if (state.isInWatchlist) "Na Minha lista" else "Minha lista",
             if (state.isInWatchlist) Icons.Default.Check else Icons.Default.Add, { viewModel.toggleWatchlist() }))
+        add(TitleAction("Escolher fonte", Icons.Default.Tune, {
+            pane = TitlePane.SOURCES; sourceIndex = 0
+            viewModel.loadStreams(state.imdbId, resumeIdentity)
+        }))
         if (state.similar.isNotEmpty()) add(TitleAction("Títulos semelhantes", Icons.Default.ViewModule, { pane = TitlePane.SIMILAR; similarIndex = 0 }))
     }
     val safeAction = actionIndex.coerceIn(0, (actions.size - 1).coerceAtLeast(0))
@@ -224,6 +232,16 @@ internal fun NetflixTitleScreen(
                         Key.Back -> { pane = TitlePane.MAIN; true }
                         else -> false
                     }
+                    TitlePane.SOURCES -> when (ev.key) {
+                        Key.DirectionUp -> { sourceIndex = (sourceIndex - 1).coerceAtLeast(0); true }
+                        Key.DirectionDown -> { sourceIndex = (sourceIndex + 1).coerceAtMost((state.streams.size - 1).coerceAtLeast(0)); true }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlay, Key.MediaPlayPause -> {
+                            state.streams.getOrNull(sourceIndex)?.let { onPlayStream(resumeIdentity, state.imdbId, resumeMs, it) }; true
+                        }
+                        Key.Back, Key.DirectionLeft -> { pane = TitlePane.MAIN; true }
+                        Key.DirectionRight -> true
+                        else -> false
+                    }
                     TitlePane.SIMILAR -> when (ev.key) {
                         Key.DirectionLeft -> { similarIndex = (similarIndex - 1).coerceAtLeast(0); true }
                         Key.DirectionRight -> { similarIndex = (similarIndex + 1).coerceAtMost(state.similar.size - 1); true }
@@ -248,7 +266,7 @@ internal fun NetflixTitleScreen(
             Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Color.Black, 0.4f to Color.Black.copy(alpha = 0.6f), 0.75f to Color.Transparent)))
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to Color.Black)))
         }
-        if (pane == TitlePane.EPISODES) {
+        if (pane == TitlePane.EPISODES || pane == TitlePane.SOURCES) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.88f)))
         }
 
@@ -274,6 +292,14 @@ internal fun NetflixTitleScreen(
                     }
                 }
             }
+            TitlePane.SOURCES -> SourcesPane(
+                title = item?.title.orEmpty(),
+                subtitle = if (isTv) "T${state.playSeason ?: 1}:E${state.playEpisode ?: 1}" else null,
+                streams = state.streams,
+                index = sourceIndex,
+                loading = state.isLoadingStreams,
+                progress = if (state.totalAddons > 0) "${state.completedAddons}/${state.totalAddons}" else null
+            )
             TitlePane.EPISODES -> EpisodesPane(
                 title = item?.title.orEmpty(),
                 totalSeasons = state.totalSeasons,
@@ -461,5 +487,51 @@ private fun SimilarCard(item: MediaItem, logo: String?, focused: Boolean) {
                 modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 14.dp, vertical = 6.dp).height(30.dp).fillMaxWidth())
         } else Text(item.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 2,
             modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
+    }
+}
+
+
+/** Lista de fontes do título (como a lista do player), para escolher antes de tocar. */
+@Composable
+private fun SourcesPane(
+    title: String,
+    subtitle: String?,
+    streams: List<com.arflix.tv.data.model.StreamSource>,
+    index: Int,
+    loading: Boolean,
+    progress: String?
+) {
+    Column(Modifier.fillMaxSize().padding(start = 64.dp, top = 36.dp, end = 64.dp)) {
+        Text("Escolher fonte", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(listOfNotNull(title, subtitle).joinToString(" · "), color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp)
+        Spacer(Modifier.height(14.dp))
+        if (streams.isEmpty()) {
+            Text(if (loading) "Buscando fontes…" + (progress?.let { " ($it)" } ?: "") else "Nenhuma fonte encontrada.",
+                color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp)
+            return@Column
+        }
+        if (loading) Text("Ainda buscando… ${progress.orEmpty()}", color = Color.White.copy(alpha = 0.45f), fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 6.dp))
+        val listState = rememberLazyListState()
+        LaunchedEffect(index) { listState.animateScrollToItem((index - 3).coerceAtLeast(0)) }
+        LazyColumn(state = listState, userScrollEnabled = false, contentPadding = PaddingValues(bottom = 200.dp)) {
+            itemsIndexed(streams, key = { i, st -> "${st.addonId}|${st.url}|$i" }) { i, st ->
+                val focused = i == index
+                val info = com.arflix.tv.ui.screens.player.loadingSourceInfo(st)
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                        .background(if (focused) Color.White else Color.White.copy(alpha = 0.05f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Text(info.first, color = if (focused) Color.Black else Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (info.second.isNotBlank()) Text(info.second, color = if (focused) Color.Black.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val name = st.behaviorHints?.filename ?: st.source
+                    if (name.isNotBlank()) Text(name, color = if (focused) Color.Black.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
     }
 }

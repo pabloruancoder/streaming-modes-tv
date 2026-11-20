@@ -84,6 +84,12 @@ object StreamingModes {
         }.toMap()
     }
 
+    /** Perfil em uso (a navegação atualiza): telas sem acesso ao perfil (player) consultam o modo por aqui. */
+    @Volatile var currentProfileId: String? = null
+
+    fun isNetflixActive(selection: Map<String, String> = _selection.value): Boolean =
+        modeFor(currentProfileId, selection)?.key == NETFLIX.key
+
     fun modeFor(profileId: String?, selection: Map<String, String> = _selection.value): Mode? =
         byKey(selection[profileId ?: ""])
 

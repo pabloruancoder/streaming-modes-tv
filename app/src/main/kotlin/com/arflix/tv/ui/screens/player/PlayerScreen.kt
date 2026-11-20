@@ -393,6 +393,8 @@ private data class PlayerScreenArgs(
 @Composable
 private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewModel) {
     val playerAccent = LocalAccentColorOverride.current ?: Color.White
+    // Streaming Modes: no modo Netflix o player usa o visual da Netflix (mesma lógica de controles).
+    val netflixPlayer = rememberNetflixPlayer()
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     DisposableEffect(Unit) {
@@ -4426,7 +4428,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
             showSourceMenu = showSourceMenu,
             onExitPlayer = onExitPlayer,
             startupPhase = startupPhase,
-            switchNotice = switchNotice
+            switchNotice = switchNotice,
+            netflix = netflixPlayer
         )
 
         // Streaming Modes TV: player das Minhas fontes por cima de tudo (some enquanto a lista de fontes está aberta).
@@ -4860,6 +4863,11 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
 
         }
 
+        // Netflix: pausa longa vira a tela "Você está assistindo" (atrás dos controles).
+        if (netflixPlayer && hasPlaybackStarted && !isInPipMode) {
+            NetflixPauseScreen(uiState, args.mediaType, args.seasonNumber, args.episodeNumber,
+                isPaused = !isPlaying && !isBuffering && !showSourceMenu && !showSubtitleMenu)
+        }
         if (!isTouchDevice && !isInPipMode) {
             // Netflix-style Controls Overlay
             AnimatedVisibility(
@@ -4884,7 +4892,14 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                     ) {
                         val isPaused = hasPlaybackStarted && !isPlaying && !isBuffering
 
-                        PlayerMetadataChrome(
+                        if (netflixPlayer) NetflixPlayerInfo(
+                            uiState = uiState,
+                            mediaType = args.mediaType,
+                            seasonNumber = args.seasonNumber,
+                            episodeNumber = args.episodeNumber,
+                            isPaused = isPaused,
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) else PlayerMetadataChrome(
                             uiState = uiState,
                             mediaType = args.mediaType,
                             seasonNumber = args.seasonNumber,
@@ -4955,7 +4970,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                 }
                             }
 
-                            if (!isTouchDevice) {
+                            if (!isTouchDevice && !netflixPlayer) {
                                 Text(
                                     currentTime.value,
                                     style = ArflixTypography.sectionTitle.copy(
@@ -4966,7 +4981,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                     maxLines = 1
                                 )
                             }
-                            if (endsAtTime.value.isNotBlank()) {
+                            if (endsAtTime.value.isNotBlank() && !netflixPlayer) {
                                 Text(
                                     "${stringResource(R.string.ends_at)} ${endsAtTime.value}",
                                     style = ArflixTypography.caption.copy(fontSize = 12.sp),
@@ -5349,7 +5364,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                 val frac = if (duration > 0) (controlsPreviewPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else progress
                                 Box(modifier = Modifier.fillMaxWidth().height(barHeight).align(Alignment.Center), contentAlignment = Alignment.CenterStart) {
                                 Box(modifier = Modifier.fillMaxWidth(frac).fillMaxHeight().background(
-                                    if (trackbarFocused) playerAccent else playerAccent.copy(alpha = 0.8f), RoundedCornerShape(8.dp)
+                                    if (netflixPlayer) NetflixPlayerRed else if (trackbarFocused) playerAccent else playerAccent.copy(alpha = 0.8f),
+                                    RoundedCornerShape(8.dp)
                                 ))
                                 }
                                 val knobSize = if (isTouchDevice) 12.dp else 14.dp
@@ -5358,16 +5374,17 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                         .offset(x = (maxWidth * frac - knobSize / 2f)
                                             .coerceIn(0.dp, (maxWidth - knobSize).coerceAtLeast(0.dp)))
                                         .size(knobSize)
-                                        .background(Color.White, CircleShape)
+                                        .background(if (netflixPlayer) NetflixPlayerRed else Color.White, CircleShape)
                                 )
                             }
 
                             Spacer(modifier = Modifier.width(8.dp))
 
                             Text(
-                                text = formatTime(duration),
+                                // Netflix mostra o tempo que falta.
+                                text = if (netflixPlayer) formatTime((duration - controlsPreviewPosition).coerceAtLeast(0L)) else formatTime(duration),
                                 style = ArflixTypography.label.copy(fontSize = if (isTouchDevice) 12.sp else 13.sp),
-                                color = Color.White.copy(alpha = 0.5f),
+                                color = Color.White.copy(alpha = if (netflixPlayer) 0.9f else 0.5f),
                                 maxLines = 1,
                                 modifier = Modifier.width(if (isTouchDevice) 48.dp else 55.dp)
                             )
@@ -5770,8 +5787,18 @@ internal fun PlayerLoadingOverlay(
     showSourceMenu: Boolean,
     onExitPlayer: () -> Unit,
     startupPhase: Int? = null,
-    switchNotice: String? = null
+    switchNotice: String? = null,
+    netflix: Boolean = false
 ) {
+    if (netflix && !isInPipMode && !showSourceMenu && uiState.error == null &&
+        (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted)
+    ) {
+        // Netflix: preto com o círculo vermelho; embaixo, discreto, qual fonte está carregando.
+        Box(Modifier.fillMaxSize().zIndex(50f)) {
+            NetflixLoadingSpinner(label = switchNotice ?: uiState.selectedStream?.let { loadingSourceInfo(it).first })
+        }
+        return
+    }
     if (!isInPipMode && !showSourceMenu && uiState.error == null &&
         (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted)
     ) {
@@ -5916,7 +5943,8 @@ internal fun sourceServerName(stream: StreamSource): String? {
 
 /** Linha 1: "FenixFlix · Zeus". Linha 2: "1080p · 🇧🇷 Português · 2.1 GB · 👤 120". */
 internal fun loadingSourceInfo(stream: StreamSource): Pair<String, String> {
-    val addon = stream.addonName.ifBlank { stream.source }.trim()
+    // Alguns addons juntam o título ao nome ("FenixFlix - 🐦🔥 Uma Família da Pesada"): fica só o nome do addon.
+    val addon = stream.addonName.ifBlank { stream.source }.substringBefore(" - ").trim()
     val server = sourceServerName(stream)
     val first = if (server != null) "$addon · $server" else addon
     val seeds = com.arflix.tv.ui.screens.details.torrentSeeders(stream)

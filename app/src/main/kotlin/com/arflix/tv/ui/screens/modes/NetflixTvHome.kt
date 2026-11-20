@@ -164,7 +164,7 @@ internal fun NetflixTvHome(
             NavEntry("Início", Icons.Default.Home, {}, ServiceHome.Filter.ALL),
             NavEntry("Séries", Icons.Default.Tv, {}, ServiceHome.Filter.SERIES),
             NavEntry("Filmes", Icons.Default.Movie, {}, ServiceHome.Filter.MOVIES),
-            NavEntry("Minha lista", Icons.Default.Add, onMyList),
+            NavEntry("Minha Netflix", Icons.Default.Add, onMyList),
             NavEntry("Trocar modo", Icons.Default.SwapHoriz, onPickMode),
             NavEntry("Configurações", Icons.Default.Settings, onSettings)
         )
@@ -210,10 +210,13 @@ internal fun NetflixTvHome(
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent ev.key in HANDLED
                 when {
+                    // Barra no topo (layout oficial da Netflix desde maio/2025).
                     navOpen -> when (ev.key) {
-                        Key.DirectionUp -> { navIndex = (navIndex - 1).coerceAtLeast(0); true }
-                        Key.DirectionDown -> { navIndex = (navIndex + 1).coerceAtMost(navEntries.size - 1); true }
-                        Key.DirectionRight, Key.Back -> { navOpen = false; true }
+                        Key.DirectionLeft -> { navIndex = (navIndex - 1).coerceAtLeast(0); true }
+                        Key.DirectionRight -> { navIndex = (navIndex + 1).coerceAtMost(navEntries.size - 1); true }
+                        Key.DirectionDown -> { navOpen = false; true }
+                        Key.DirectionUp -> true
+                        Key.Back -> { onBack(); true }
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
                             val e = navEntries[navIndex]
                             navOpen = false
@@ -226,10 +229,10 @@ internal fun NetflixTvHome(
                         else -> false
                     }
                     inHero -> when (ev.key) {
-                        Key.DirectionLeft -> { if (heroButton > 0) heroButton-- else { navIndex = selectedNav; navOpen = true }; true }
+                        Key.DirectionLeft -> { if (heroButton > 0) heroButton--; true }
                         Key.DirectionRight -> { heroButton = (heroButton + 1).coerceAtMost(1); true }
                         Key.DirectionDown -> { if (rows.isNotEmpty()) { inHero = false; rowIndex = 0 }; true }
-                        Key.DirectionUp -> true
+                        Key.DirectionUp -> { navIndex = selectedNav; navOpen = true; true }
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { billboard?.let { onOpen(it, heroButton == 0) }; true }
                         Key.MediaPlay, Key.MediaPlayPause -> { billboard?.let { onOpen(it, true) }; true }
                         Key.Back -> { navIndex = selectedNav; navOpen = true; true }
@@ -239,7 +242,6 @@ internal fun NetflixTvHome(
                         Key.DirectionLeft -> {
                             val row = currentRow
                             if (row != null && currentCol > 0) colByRow[row.id] = currentCol - 1
-                            else { navIndex = selectedNav; navOpen = true }
                             true
                         }
                         Key.DirectionRight -> {
@@ -261,7 +263,7 @@ internal fun NetflixTvHome(
             }
     ) {
         val screenH = maxHeight
-        val previewH = screenH * 0.62f
+        val previewH = screenH * 0.70f
 
         // ---- Destaque (acompanha o título focado) ----
         NetflixPreview(
@@ -278,7 +280,7 @@ internal fun NetflixTvHome(
         )
 
         // ---- Fileiras ----
-        val rowsTop = if (inHero) previewH + 22.dp else previewH * 0.80f
+        val rowsTop = if (inHero) previewH + 6.dp else previewH * 0.74f
         val animatedTop by animateDpAsState(rowsTop, tween(320), label = "rowsTop")
         LazyColumn(
             state = listState,
@@ -305,16 +307,15 @@ internal fun NetflixTvHome(
 
         if (state.page.isLoading && rows.isEmpty()) {
             Text("Carregando…", color = Color.White.copy(alpha = 0.6f), fontSize = 18.sp,
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 112.dp, bottom = 120.dp))
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 56.dp, bottom = 120.dp))
         }
 
-        // ---- Menu lateral ----
-        NetflixNavRail(
+        // ---- Barra no topo ----
+        NetflixTopBar(
             entries = navEntries,
-            open = navOpen,
-            focusedIndex = navIndex,
+            focusedIndex = if (navOpen) navIndex else -1,
             selectedIndex = selectedNav,
-            modifier = Modifier.fillMaxHeight().zIndex(10f)
+            modifier = Modifier.fillMaxWidth().zIndex(10f)
         )
     }
 }
@@ -369,7 +370,7 @@ private fun NetflixPreview(
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 112.dp, top = 36.dp)
+                .padding(start = 56.dp, top = 66.dp)
                 .widthIn(max = 430.dp)
         ) {
             if (isOriginal) {
@@ -389,7 +390,7 @@ private fun NetflixPreview(
                     contentDescription = item.title,
                     contentScale = ContentScale.Fit,
                     alignment = Alignment.CenterStart,
-                    modifier = Modifier.heightIn(max = 84.dp).widthIn(max = 320.dp)
+                    modifier = Modifier.heightIn(max = 72.dp).widthIn(max = 300.dp)
                 )
             } else {
                 Text(item.title, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black, maxLines = 2,
@@ -496,13 +497,13 @@ private fun NetflixRow(
         Text(
             title, color = Color.White.copy(alpha = if (focusedCol >= 0) 1f else 0.8f),
             fontSize = 15.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 112.dp, bottom = 6.dp)
+            modifier = Modifier.padding(start = 56.dp, bottom = 6.dp)
         )
         Box {
             LazyRow(
                 state = rowState,
                 userScrollEnabled = false,
-                contentPadding = PaddingValues(start = 112.dp, end = 400.dp),
+                contentPadding = PaddingValues(start = 56.dp, end = 400.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (top10) 4.dp else 8.dp)
             ) {
                 itemsIndexed(items, key = { _, it -> "${it.mediaType}_${it.id}" }) { i, item ->
@@ -513,7 +514,7 @@ private fun NetflixRow(
             }
             // As capas que já passaram somem à esquerda (o foco fica sempre na primeira posição).
             Box(
-                Modifier.width(112.dp).height(if (top10) 160.dp else 110.dp)
+                Modifier.width(56.dp).height(if (top10) 160.dp else 110.dp)
                     .background(Brush.horizontalGradient(0f to NetflixBg, 0.75f to NetflixBg, 1f to Color.Transparent))
             )
         }
@@ -653,6 +654,48 @@ private fun NetflixNavRail(entries: List<NavEntry>, open: Boolean, focusedIndex:
                 }
                 if (selected && !open) {
                     Box(Modifier.padding(start = 16.dp).size(width = 22.dp, height = 3.dp).background(NetflixRed, RoundedCornerShape(2.dp)))
+                }
+            }
+        }
+    }
+}
+
+
+/**
+ * Barra de navegação no topo, como no app da Netflix para TV desde maio/2025: perfil, Buscar, Início, Séries,
+ * Filmes e Minha Netflix à esquerda; Trocar modo e Configurações (do app) à direita.
+ */
+@Composable
+private fun NetflixTopBar(entries: List<NavEntry>, focusedIndex: Int, selectedIndex: Int, modifier: Modifier) {
+    Box(modifier.background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.75f), 1f to Color.Transparent))) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 48.dp, end = 40.dp, top = 14.dp, bottom = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            entries.forEachIndexed { i, e ->
+                if (i == entries.size - 2) Spacer(Modifier.weight(1f))
+                val focused = i == focusedIndex
+                val selected = i == selectedIndex
+                val iconOnly = i == 0 || i == 1 || i >= entries.size - 2
+                Box(
+                    Modifier
+                        .padding(horizontal = 4.dp)
+                        .background(if (focused) Color.White else Color.Transparent, RoundedCornerShape(if (iconOnly) 50 else 6))
+                        .padding(horizontal = if (iconOnly) 7.dp else 12.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val fg = when {
+                        focused -> Color.Black
+                        selected -> Color.White
+                        else -> Color.White.copy(alpha = 0.7f)
+                    }
+                    when {
+                        i == 0 -> Box(Modifier.size(24.dp).background(Color(0xFF2B6CE0), RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
+                            Icon(e.icon, contentDescription = e.label, tint = Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        iconOnly -> Icon(e.icon, contentDescription = e.label, tint = fg, modifier = Modifier.size(20.dp))
+                        else -> Text(e.label, color = fg, fontSize = 15.sp, fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium)
+                    }
                 }
             }
         }

@@ -42,7 +42,7 @@ internal data class NSSeed(val type: MediaType, val id: Int, val name: String)
 /** Categorias da coluna da esquerda (as mesmas do plugin do PC). */
 internal val NF_SEARCH_CATEGORIES = listOf(
     "Terror", "Comédia", "Ação", "Drama", "Romance", "Suspense", "Policial", "Ficção científica",
-    "Fantasia", "Documentários", "Anime", "Animação", "Família", "Reality shows", "Brasileiros", "Mistério", "Guerra", "Faroeste"
+    "Fantasia", "Documentários", "Doramas", "Anime", "Animação", "Família", "Reality shows", "Brasileiros", "Mistério", "Guerra", "Faroeste"
 )
 
 internal fun nfNorm(s: String?): String =
@@ -58,7 +58,8 @@ private data class NSGenre(
     val terms: List<String>,
     val lang: String? = null,
     val country: String? = null,
-    val only: String? = null
+    val only: String? = null,
+    val seriesOnly: Boolean = false
 )
 
 /** Gêneros do TMDB (ids de filme / série) e os termos que as pessoas digitam. Igual ao addon do PC (src/search.js). */
@@ -75,6 +76,7 @@ private val GENRES = listOf(
     NSGenre("Documentários", "99", "99", listOf("documentario", "documentarios", "doc", "docs")),
     NSGenre("Animação", "16", "16", listOf("animacao", "desenho", "desenhos", "animados")),
     NSGenre("Anime", "16", "16", listOf("anime", "animes"), lang = "ja"),
+    NSGenre("Doramas", null, "18", listOf("dorama", "doramas", "kdrama", "k drama", "kdramas", "drama coreano", "dramas coreanos", "novela coreana", "coreano", "coreanos", "cdrama", "jdrama"), country = "KR|JP|CN|TW|TH", seriesOnly = true),
     NSGenre("Família", "10751", "10751", listOf("familia", "infantil", "kids", "criancas")),
     NSGenre("Mistério", "9648", "9648", listOf("misterio")),
     NSGenre("Guerra", "10752", "10768", listOf("guerra", "war")),
@@ -291,12 +293,13 @@ internal class NetflixSearchViewModel @Inject constructor() : ViewModel() {
     private suspend fun genreResults(g: NSGenre, pages: List<Int>): List<Pair<JSONObject, String>> {
         suspend fun forType(type: String): List<JSONObject> {
             if (g.only != null && g.only != type) return emptyList()
+            if (g.seriesOnly && type == "movie") return emptyList()
             val params = mutableMapOf<String, Any>("sort_by" to "popularity.desc")
-            when {
-                g.country != null -> params["with_origin_country"] = g.country
-                (if (type == "movie") g.movie else g.tv) != null -> params["with_genres"] = (if (type == "movie") g.movie else g.tv)!!
-                else -> return emptyList()
-            }
+            val genre = if (type == "movie") g.movie else g.tv
+            if (g.country == null && genre == null) return emptyList()
+            g.country?.let { params["with_origin_country"] = it }
+            genre?.let { params["with_genres"] = it }
+            if (g.seriesOnly) params["without_genres"] = "16" // doramas: sem anime/animação
             g.lang?.let { params["with_original_language"] = it }
             return pages.mapLimit(2) { discover(type, params, it) }.flatten()
         }
@@ -353,7 +356,7 @@ internal class NetflixSearchViewModel @Inject constructor() : ViewModel() {
         val out = mutableListOf<String>()
         fun push(s: String?) { if (!s.isNullOrBlank() && out.none { nfNorm(it) == nfNorm(s) }) out += s }
         GENRES.forEach { gg -> if (nfNorm(gg.label).startsWith(n) || gg.terms.any { it.startsWith(n) }) push(gg.label) }
-        if (g != null) { push("${g.label} - filmes"); push("${g.label} - séries") }
+        if (g != null && !g.seriesOnly) { push("${g.label} - filmes"); push("${g.label} - séries") }
         people.forEach(::push)
         // Só nomes em alfabeto latino (o TMDB às vezes devolve o título original em outra escrita).
         items.filter { t -> t.title.any { it in 'A'..'Z' || it in 'a'..'z' } }.take(12).forEach { push(it.title) }

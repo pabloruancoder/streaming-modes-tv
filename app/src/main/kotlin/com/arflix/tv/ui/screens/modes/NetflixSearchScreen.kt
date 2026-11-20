@@ -211,7 +211,7 @@ internal fun NetflixSearchScreen(
                             true
                         }
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { press(KB_KEYS[keyIndex]); true }
-                        Key.Back -> { if (query.isNotEmpty()) press("⌫") else onBack(); true }
+                        Key.Back -> { onBack(); true }
                         else -> false
                     }
                     Zone.TERMS -> when (ev.key) {
@@ -220,7 +220,7 @@ internal fun NetflixSearchScreen(
                         Key.DirectionLeft -> true
                         Key.DirectionRight -> { leftZone = Zone.TERMS; enterGrid(); true }
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { terms.getOrNull(termIndex)?.let { setQuery(it) }; true }
-                        Key.Back -> { zone = Zone.KEYS; true }
+                        Key.Back -> { onBack(); true }
                         else -> false
                     }
                     Zone.GRID -> {
@@ -253,7 +253,7 @@ internal fun NetflixSearchScreen(
                                 true
                             }
                             Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { items.getOrNull(itemIndex)?.let { onOpen(it.type, it.id) }; true }
-                            Key.Back -> { zone = Zone.KEYS; true }
+                            Key.Back -> { onBack(); true }
                             else -> false
                         }
                     }

@@ -138,7 +138,7 @@ internal fun NetflixNewPopularScreen(
                     Key.DirectionRight -> { row?.let { cols[it.id] = (col + 1).coerceAtMost(it.items.size - 1) }; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { open(play = false); true }
                     Key.MediaPlay, Key.MediaPlayPause -> { open(play = true); true }
-                    Key.Back -> { if (col > 0 && row != null) cols[row.id] = 0 else onBack(); true }
+                    Key.Back -> { onBack(); true }
                     else -> false
                 }
             }

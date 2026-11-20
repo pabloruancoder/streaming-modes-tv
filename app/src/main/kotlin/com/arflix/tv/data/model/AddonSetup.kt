@@ -55,4 +55,4 @@ val Addon.settingsPageUrl: String?
 
 /** The preinstalled OpenSubtitles addon cannot be removed. */
 val Addon.isRemovable: Boolean
-    get() = !(id == "opensubtitles" && type == AddonType.SUBTITLE)
+    get() = !(id == "opensubtitles" && type == AddonType.SUBTITLE) && id != com.arflix.tv.data.embed.EmbedSources.ADDON_ID

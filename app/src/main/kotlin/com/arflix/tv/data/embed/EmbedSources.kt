@@ -1,8 +1,13 @@
 package com.arflix.tv.data.embed
 
+import android.content.Context
 import android.net.Uri
+import com.arflix.tv.data.model.Addon
+import com.arflix.tv.data.model.AddonType
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.StreamSource
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * "Minhas fontes" do Streaming Modes (iguais às do PC): players embutidos de sites (StreamBetter, Pomfy).
@@ -13,6 +18,33 @@ object EmbedSources {
     const val SCHEME = "smembed://"
     const val ADDON_PREFIX = "sm.embed."
     const val ADDON_NAME = "Minhas fontes"
+    /** Cartão "Minhas fontes" na tela de Addons (não é um addon do Stremio: liga/desliga as fontes embutidas). */
+    const val ADDON_ID = "sm.minhasfontes"
+    private const val PREFS = "streaming_modes"
+    private const val KEY_ENABLED = "minhas_fontes_enabled"
+
+    private val _enabled = MutableStateFlow(true)
+    val enabled: StateFlow<Boolean> = _enabled
+
+    /** Lê a preferência (chamado na abertura do app). */
+    fun attach(context: Context) {
+        _enabled.value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, true)
+    }
+
+    fun setEnabled(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, on).apply()
+        _enabled.value = on
+    }
+
+    fun asAddon(isEnabled: Boolean): Addon = Addon(
+        id = ADDON_ID,
+        name = ADDON_NAME,
+        version = "1.0",
+        description = PROVIDERS.joinToString(" · ") { it.name } + " — tocam no player do app, sem anúncios",
+        isInstalled = true,
+        isEnabled = isEnabled,
+        type = AddonType.CUSTOM
+    )
 
     data class Provider(
         val key: String,
@@ -62,7 +94,7 @@ object EmbedSources {
 
     /** Uma fonte por site, para o título pedido (ids do TMDB; série precisa de temporada e episódio). */
     fun streamsFor(mediaType: MediaType, tmdbId: Int, season: Int?, episode: Int?): List<StreamSource> {
-        if (tmdbId <= 0) return emptyList()
+        if (tmdbId <= 0 || !_enabled.value) return emptyList()
         val isTv = mediaType == MediaType.TV
         if (isTv && (season == null || episode == null)) return emptyList()
         return PROVIDERS.map { p ->

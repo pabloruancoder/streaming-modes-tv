@@ -2673,7 +2673,10 @@ class DetailsViewModel @Inject constructor(
                         title = item?.title.orEmpty(),
                         year = item?.year?.toIntOrNull(),
                         nativeType = mediaRepository.addonNativeType(currentMediaId)
-                    ).collect { progressive ->
+                    ).map { p ->
+                        // Streaming Modes TV: Minhas fontes no topo da lista de fontes.
+                        p.copy(streams = com.arflix.tv.data.embed.EmbedSources.streamsFor(MediaType.MOVIE, currentMediaId, null, null) + p.streams)
+                    }.collect { progressive ->
                         if (!isCurrentRequest()) return@collect
                         val existingVod = _uiState.value.streams.filter(::isSupplementalStream)
                         val mergedStreams = sortPlayableStreamsFirst(
@@ -2745,7 +2748,11 @@ class DetailsViewModel @Inject constructor(
                         animeQueryOverride = animeQueryOverride,
                         airDate = episodeAirDate,
                         nativeType = mediaRepository.addonNativeType(currentMediaId)
-                    ).collect { progressive ->
+                    ).map { p ->
+                        p.copy(streams = com.arflix.tv.data.embed.EmbedSources.streamsFor(
+                            MediaType.TV, currentMediaId, canonicalSeason ?: 1, canonicalEpisode ?: 1
+                        ) + p.streams)
+                    }.collect { progressive ->
                         if (!isCurrentRequest()) return@collect
                         val existingVod = _uiState.value.streams.filter(::isSupplementalStream)
                         val mergedStreams = sortPlayableStreamsFirst(

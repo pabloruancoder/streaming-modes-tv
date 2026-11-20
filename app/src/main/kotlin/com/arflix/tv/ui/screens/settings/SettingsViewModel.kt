@@ -1272,12 +1272,17 @@ class SettingsViewModel @Inject constructor(
 
     private fun observeAddons() {
         viewModelScope.launch {
-            streamRepository.personalAddons.collect { addons ->
+            kotlinx.coroutines.flow.combine(
+                streamRepository.personalAddons,
+                com.arflix.tv.data.embed.EmbedSources.enabled
+            ) { a, e -> a to e }.collect { (addons, embedsOn) ->
                 runCatching {
                     withContext(Dispatchers.Default) { catalogRepository.syncAddonCatalogs(addons) }
                 }
-                if (_uiState.value.addons != addons) {
-                    _uiState.value = _uiState.value.copy(addons = addons)
+                // Streaming Modes TV: "Minhas fontes" (StreamBetter/Pomfy) primeiro na lista de addons.
+                val shown = listOf(com.arflix.tv.data.embed.EmbedSources.asAddon(embedsOn)) + addons
+                if (_uiState.value.addons != shown) {
+                    _uiState.value = _uiState.value.copy(addons = shown)
                 }
             }
         }
@@ -2741,6 +2746,10 @@ class SettingsViewModel @Inject constructor(
 
     fun toggleAddon(addonId: String) {
         if (!canManage("connections")) return
+        if (addonId == com.arflix.tv.data.embed.EmbedSources.ADDON_ID) {
+            com.arflix.tv.data.embed.EmbedSources.setEnabled(context, !com.arflix.tv.data.embed.EmbedSources.enabled.value)
+            return
+        }
         viewModelScope.launch {
             val addon = streamRepository.installedAddons.first().firstOrNull { it.id == addonId }
             if (addon != null && addon.needsConfiguration && !addon.isEnabled) {
@@ -4280,6 +4289,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun removeAddon(addonId: String) {
+        if (addonId == com.arflix.tv.data.embed.EmbedSources.ADDON_ID) return
         if (!canManage("connections")) return
         viewModelScope.launch {
             streamRepository.removeAddon(addonId)

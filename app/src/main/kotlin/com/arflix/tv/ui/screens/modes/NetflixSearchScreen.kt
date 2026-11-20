@@ -73,15 +73,31 @@ private val KB_KEYS: List<String> = listOf("␣", "⌫") + ('a'..'z').map { it.t
 internal fun NetflixSearchScreen(
     onOpen: (MediaType, Int) -> Unit,
     onBack: () -> Unit,
-    viewModel: SearchViewModel = hiltViewModel()
+    viewModel: SearchViewModel = hiltViewModel(),
+    picks: com.arflix.tv.ui.screens.collections.ServiceHomeViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // Sem nada digitado: "Principais buscas" com o que está em alta na Netflix Brasil (como a Netflix).
+    LaunchedEffect(Unit) { picks.load(com.arflix.tv.data.modes.StreamingModes.catalog(com.arflix.tv.data.modes.StreamingModes.NETFLIX)) }
+    val picksState by picks.uiState.collectAsStateWithLifecycle()
+    val pickLogos by picks.cardLogoUrls.collectAsStateWithLifecycle()
+    val recommendations = remember(picksState.page.rows) {
+        val lists = picksState.page.rows.map { it.items }
+        buildList { for (i in 0 until (lists.maxOfOrNull { it.size } ?: 0)) lists.forEach { l -> l.getOrNull(i)?.let(::add) } }
+            .filter { !it.backdrop.isNullOrBlank() }.distinctBy { it.mediaType to it.id }.take(30)
+    }
+    LaunchedEffect(recommendations.size) { picks.preloadLogos(recommendations.take(12)) }
     var query by rememberSaveable { mutableStateOf(state.query) }
     var inResults by rememberSaveable { mutableStateOf(false) }
     // Linha 0 = [espaço, apagar]; depois as teclas em 6 colunas.
     var keyIndex by rememberSaveable { mutableIntStateOf(2) }
     var resultIndex by rememberSaveable { mutableIntStateOf(0) }
-    val results = state.results.filter { it.mediaType == MediaType.MOVIE || it.mediaType == MediaType.TV }
+    val searched = state.results.filter { it.mediaType == MediaType.MOVIE || it.mediaType == MediaType.TV }
+    val results = if (query.isBlank()) recommendations else searched
+    val logoFor: (com.arflix.tv.data.model.MediaItem) -> String? = { item ->
+        val key = "${item.mediaType}_${item.id}"
+        if (query.isBlank()) pickLogos[key] else state.cardLogoUrls[key]
+    }
     val cols = 3
 
     fun setQuery(q: String) { query = q; viewModel.updateQuery(q) }
@@ -185,7 +201,7 @@ internal fun NetflixSearchScreen(
             Column(Modifier.weight(1f)) {
                 Text(
                     when {
-                        query.isBlank() -> "Digite o nome de um filme, série ou pessoa"
+                        query.isBlank() -> if (recommendations.isEmpty()) "Carregando recomendações…" else "Principais buscas"
                         state.isLoading && results.isEmpty() -> "Buscando…"
                         results.isEmpty() -> "Nada encontrado para \"$query\""
                         else -> "Filmes e séries"
@@ -198,7 +214,7 @@ internal fun NetflixSearchScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     itemsIndexed(results, key = { _, it -> "${it.mediaType}_${it.id}" }) { i, item ->
-                        SearchCard(item, state.cardLogoUrls["${item.mediaType}_${item.id}"], focused = inResults && i == resultIndex)
+                        SearchCard(item, logoFor(item), focused = inResults && i == resultIndex)
                     }
                 }
             }

@@ -273,3 +273,8 @@
 # Streaming Modes TV: libtorrent4j (SWIG/JNI)
 -keep class org.libtorrent4j.** { *; }
 -dontwarn org.libtorrent4j.**
+
+# Streaming Modes TV: ponte JS do player das "Minhas fontes" (WebView)
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}

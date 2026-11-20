@@ -1638,7 +1638,7 @@ class PlayerViewModel @Inject constructor(
                 fun priorityAddonPending(streams: List<StreamSource>): Boolean =
                     hasPriorityAddon && !lastProgressiveFinal &&
                         System.currentTimeMillis() - collectionStartMs < PRIORITY_ADDON_WAIT_MS &&
-                        streams.none { com.arflix.tv.ui.screens.details.streamingModesTier(it) == 0 }
+                        streams.none { com.arflix.tv.ui.screens.details.streamingModesTier(it) <= 0 }
                 var isFirstEmission = true
                 var sourceEmptyReported = false
 
@@ -1674,8 +1674,11 @@ class PlayerViewModel @Inject constructor(
                         }
                     val existingVod = _uiState.value.streams.filter(::isSupplementalStream)
                     val activeStreamList = listOfNotNull(_uiState.value.selectedStream)
+                    val embedStreams = com.arflix.tv.data.embed.EmbedSources.streamsFor(
+                        currentMediaType, currentMediaId, currentSeason, currentEpisode
+                    )
                     val mergedStreams = sortStreamsByQualityAndSize(
-                        (allStreams + existingVod + activeStreamList)
+                        (embedStreams + allStreams + existingVod + activeStreamList)
                             .distinctBy(::providerScopedStreamIdentity),
                         preferredLanguage
                     )
@@ -2692,6 +2695,8 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun addonOrderIndex(stream: StreamSource): Int {
+        // Minhas fontes ficam no topo da lista de fontes.
+        if (com.arflix.tv.data.embed.EmbedSources.isEmbedStream(stream)) return -10 + com.arflix.tv.data.embed.EmbedSources.rank(stream)
         if (currentAddonOrderedIds.isEmpty()) return Int.MAX_VALUE
         val tabId = if (stream.addonId == HomeServerRepository.ADDON_ID) {
             val baseName = stream.addonName.split(" - ").firstOrNull()?.trim().orEmpty()

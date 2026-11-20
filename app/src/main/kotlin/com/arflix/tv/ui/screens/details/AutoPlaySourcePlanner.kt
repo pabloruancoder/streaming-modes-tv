@@ -113,6 +113,9 @@ private fun isFenixFlix(stream: StreamSource): Boolean =
  * Dentro de cada faixa: português primeiro, depois seeds, qualidade e tamanho.
  */
 internal fun streamingModesTier(stream: StreamSource): Int = when {
+    // Minhas fontes primeiro: StreamBetter (-2), Pomfy (-1).
+    com.arflix.tv.data.embed.EmbedSources.isEmbedStream(stream) ->
+        com.arflix.tv.data.embed.EmbedSources.rank(stream) - com.arflix.tv.data.embed.EmbedSources.PROVIDERS.size
     isFenixFlix(stream) -> 0
     isEmbeddedTorrentStream(stream) && isPortugueseStream(stream) -> 1
     !isEmbeddedTorrentStream(stream) -> 2
@@ -190,6 +193,8 @@ internal fun minQualityThreshold(value: String): Int {
 }
 
 internal fun isAutoPlayableStream(stream: StreamSource): Boolean {
+    // Minhas fontes (StreamBetter/Pomfy): tocam no player embutido.
+    if (com.arflix.tv.data.embed.EmbedSources.isEmbedStream(stream)) return true
     val url = stream.url?.trim().orEmpty()
     // A Stalker VOD source carries a placeholder that only turns into an http
     // URL when playback starts. It is autoplayable all the same - resolving it

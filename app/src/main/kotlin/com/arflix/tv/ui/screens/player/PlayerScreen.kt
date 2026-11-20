@@ -1986,7 +1986,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
         uiState.selectedStream?.preview, allowSecondarySeekPreviewDecoder, useNativeSeekKeyframes,
     ) {
         // Torrent embutido: a prévia pediria pedaços espalhados do arquivo e atrasaria o download em ordem.
-        if (!seekThumbnailsEnabled || com.arflix.tv.data.torrent.TorrentStream.isLocalUrl(uiState.selectedStreamUrl)) {
+        if (!seekThumbnailsEnabled || com.arflix.tv.data.torrent.TorrentStream.isLocalUrl(uiState.selectedStreamUrl) ||
+            com.arflix.tv.data.embed.EmbedSources.isEmbedUrl(uiState.selectedStreamUrl)) {
             seekPreviewProvider.configure(null)
             return@LaunchedEffect
         }
@@ -2777,6 +2778,12 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
         val url = uiState.selectedStreamUrl
         if (BuildConfig.DEBUG) {
         }
+        // Minhas fontes (StreamBetter/Pomfy): tocam no EmbedPlayerOverlay, o ExoPlayer fica parado.
+        if (com.arflix.tv.data.embed.EmbedSources.isEmbedUrl(url)) {
+            runCatching { exoPlayer.stop(); exoPlayer.clearMediaItems() }
+            startupPhase = null
+            return@LaunchedEffect
+        }
         if (url != null) {
             startupTrace.begin()
             // Track when stream was selected (before any blocking probes)
@@ -3497,6 +3504,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
 
             // Initial startup watchdog: while first frame has not really started, enforce bounded startup.
             val startupPending = uiState.selectedStreamUrl != null && !hasPlaybackStarted &&
+                !com.arflix.tv.data.embed.EmbedSources.isEmbedUrl(uiState.selectedStreamUrl) &&
                 !iptvVodGate.isClosedForBackground && !iptvVodGate.hasPendingReopen
             if (startupPending) {
                 val selectedAt = streamSelectedTime ?: System.currentTimeMillis()
@@ -4420,6 +4428,48 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
             startupPhase = startupPhase,
             switchNotice = switchNotice
         )
+
+        // Streaming Modes TV: player das Minhas fontes por cima de tudo (some enquanto a lista de fontes está aberta).
+        com.arflix.tv.data.embed.EmbedSources.parse(uiState.selectedStreamUrl)?.takeIf { !showSourceMenu }?.let { embed ->
+            EmbedPlayerOverlay(
+                embed = embed,
+                title = uiState.title,
+                startPositionMs = uiState.savedPosition,
+                skip = uiState.activeSkipInterval,
+                skipDismissed = uiState.skipIntervalDismissed,
+                hasNextEpisode = nextEpisodeIdentity != null,
+                onPosition = { pos -> viewModel.onPlaybackPosition(pos) },
+                onProgress = { pos, dur, playingNow ->
+                    viewModel.saveProgress(
+                        position = pos,
+                        duration = dur,
+                        progressPercent = ((pos * 100) / dur.coerceAtLeast(1L)).toInt(),
+                        isPlaying = playingNow,
+                        playbackState = Player.STATE_READY
+                    )
+                },
+                onSkipUsed = { viewModel.dismissSkipInterval() },
+                onNextEpisode = {
+                    val sel = uiState.selectedStream
+                    nextEpisodeIdentity?.let { playNextEpisode(it, sel?.addonId, sel?.source, sel?.behaviorHints?.bingeGroup) }
+                },
+                onOpenSources = { showSourceMenu = true },
+                onFailed = {
+                    if (!userSelectedSourceManually) {
+                        tryAdvanceToNextStream(reason = "${embed.provider.name} não carregou")
+                    }
+                },
+                onExit = onExitPlayer,
+                onResolved = { mediaUrl, headers ->
+                    // A página entregou o endereço do vídeo: toca no player do app (imagem, controles e qualidade nativos).
+                    uiState.selectedStream?.let { sel ->
+                        val hints = (sel.behaviorHints ?: com.arflix.tv.data.model.StreamBehaviorHints())
+                            .copy(proxyHeaders = com.arflix.tv.data.model.ProxyHeaders(request = headers), notWebReady = true)
+                        viewModel.selectStream(sel.copy(url = mediaUrl, behaviorHints = hints), uiState.savedPosition.takeIf { it > 0L })
+                    }
+                }
+            )
+        }
 
         // Buffering indicator - only show after playback has started (mid-stream buffering)
         // Initial buffering is handled by the main loading screen above

@@ -431,6 +431,8 @@ ksp {
     val media3Version = "1.9.0"
     // Streaming Modes TV: torrent embutido (fontes P2P dos addons tocam sem TorrServer/debrid).
     val libtorrent4jVersion = "2.1.0-39"
+    // Streaming Modes TV: script de ponte dentro da página das Minhas fontes (WebView)
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("org.libtorrent4j:libtorrent4j:$libtorrent4jVersion")
     implementation("org.libtorrent4j:libtorrent4j-android-arm:$libtorrent4jVersion")
     implementation("org.libtorrent4j:libtorrent4j-android-arm64:$libtorrent4jVersion")

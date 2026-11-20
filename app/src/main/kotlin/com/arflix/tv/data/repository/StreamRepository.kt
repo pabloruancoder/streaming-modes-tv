@@ -4709,6 +4709,7 @@ class StreamRepository @Inject constructor(
         stream: StreamSource,
         allowNetworkWarmup: Boolean = true
     ): StreamSource? = withContext(Dispatchers.IO) {
+        if (com.arflix.tv.data.embed.EmbedSources.isEmbedStream(stream)) return@withContext null
         if (!canPrewarmWithoutSideEffects(stream)) return@withContext null
         val resolved = resolveStreamForPlayback(stream) ?: return@withContext null
         if (allowNetworkWarmup && canPrewarmWithoutSideEffects(resolved)) {
@@ -4752,6 +4753,8 @@ class StreamRepository @Inject constructor(
             val live = com.arflix.tv.data.torrent.TorrentStream.refreshUrl(context, url) ?: return null
             return if (live == url) stream else stream.copy(url = live)
         }
+        // Minhas fontes: abre no player embutido (WebView), não há o que resolver.
+        if (com.arflix.tv.data.embed.EmbedSources.isEmbedUrl(url)) return stream
         // Magnet que não virou endereço local (hash inválido): não tocável.
         if (url.startsWith("magnet:", ignoreCase = true)) return null
 

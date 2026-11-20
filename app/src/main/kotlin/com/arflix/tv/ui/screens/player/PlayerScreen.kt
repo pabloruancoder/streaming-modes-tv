@@ -4502,7 +4502,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .zIndex(5f) // Ensure it's above the controls overlay scrim.
-                    .padding(end = if (isTouchDevice) 24.dp else 48.dp, bottom = if (showControls) 90.dp else 32.dp)
+                    .padding(end = if (isTouchDevice) 24.dp else 48.dp, bottom = if (showControls) 90.dp else 32.dp),
+                netflix = netflixPlayer
             )
         }
 
@@ -4858,7 +4859,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                 focusedButtonOverride = nextEpisodePromptButton,
                 onFocusedButtonChange = { nextEpisodePromptButton = it },
                 onPlayNext = playPendingNextEpisode,
-                onCancel = cancelNextEpisodePrompt
+                onCancel = cancelNextEpisodePrompt,
+                netflix = netflixPlayer
             )
 
         }

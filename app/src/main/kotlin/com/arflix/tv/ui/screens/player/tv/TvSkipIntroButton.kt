@@ -56,7 +56,9 @@ fun TvSkipIntroButton(
     controlsVisible: Boolean,
     onSkip: () -> Unit,
     focusRequester: FocusRequester,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Streaming Modes: visual da Netflix (retângulo com borda branca; focado fica branco). */
+    netflix: Boolean = false
 ) {
     val shouldShow = interval != null && !dismissed
     var autoHidden by remember { mutableStateOf(false) }
@@ -92,7 +94,7 @@ fun TvSkipIntroButton(
         }
     }
 
-    val shape = RoundedCornerShape(16.dp) // match PlayerTextButtonFocusable
+    val shape = RoundedCornerShape(if (netflix) 4.dp else 16.dp) // match PlayerTextButtonFocusable
     val scale by animateFloatAsState(if (isFocused) 1.08f else 1f, label = "skip_scale")
 
     AnimatedVisibility(
@@ -126,22 +128,26 @@ fun TvSkipIntroButton(
                     scaleY = scale
                 }
                 .background(
-                    if (isFocused) Color.White else Color.White.copy(alpha = 0.1f),
+                    when {
+                        isFocused -> Color.White
+                        netflix -> Color.Black.copy(alpha = 0.35f)
+                        else -> Color.White.copy(alpha = 0.1f)
+                    },
                     shape
                 )
                 .border(
-                    width = 1.dp,
-                    color = Color.White.copy(alpha = 0.2f),
+                    width = if (netflix) 2.dp else 1.dp,
+                    color = if (netflix) Color.White else Color.White.copy(alpha = 0.2f),
                     shape = shape
                 )
-                .padding(horizontal = 20.dp, vertical = 10.dp),
+                .padding(horizontal = if (netflix) 26.dp else 20.dp, vertical = if (netflix) 12.dp else 10.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = skipLabel(interval?.type),
                 style = ArflixTypography.body.copy(
-                    fontSize = 14.sp,
-                    fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal
+                    fontSize = if (netflix) 16.sp else 14.sp,
+                    fontWeight = if (isFocused || netflix) FontWeight.SemiBold else FontWeight.Normal
                 ),
                 color = if (isFocused) Color.Black else Color.White
             )

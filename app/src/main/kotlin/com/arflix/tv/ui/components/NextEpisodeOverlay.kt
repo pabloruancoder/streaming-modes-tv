@@ -81,7 +81,9 @@ fun NextEpisodeOverlay(
     focusedButtonOverride: Int? = null,
     onFocusedButtonChange: ((Int) -> Unit)? = null,
     onPlayNext: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    /** Streaming Modes: visual da Netflix (botão "Próximo episódio" que enche com a contagem + "Assistir créditos"). */
+    netflix: Boolean = false
 ) {
     var internalFocusedButton by remember(isVisible) { mutableIntStateOf(0) } // 0 = play, 1 = cancel
     var countdown by remember(isVisible) { mutableIntStateOf(countdownSeconds) }
@@ -170,6 +172,19 @@ fun NextEpisodeOverlay(
                 .focusable(),
             contentAlignment = Alignment.BottomEnd
         ) {
+            if (netflix) {
+                NetflixNextEpisode(
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    episodeTitle = episodeTitle,
+                    countdown = countdown,
+                    progress = progress,
+                    focusedButton = focusedButton,
+                    onPlay = { playNextOnce() },
+                    onCredits = { cancelOnce() }
+                )
+                return@Box
+            }
             // Card positioned at bottom right
             Box(
                 modifier = Modifier
@@ -362,6 +377,77 @@ fun NextEpisodeOverlay(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+
+/**
+ * "Próximo episódio" no estilo da Netflix: no canto inferior direito, o nome do episódio e dois botões —
+ * "▶ Próximo episódio" (branco, com a contagem enchendo o fundo) e "Assistir créditos".
+ */
+@Composable
+private fun NetflixNextEpisode(
+    seasonNumber: Int,
+    episodeNumber: Int,
+    episodeTitle: String,
+    countdown: Int,
+    progress: Float,
+    focusedButton: Int,
+    onPlay: () -> Unit,
+    onCredits: () -> Unit
+) {
+    Column(Modifier.padding(end = 48.dp, bottom = 56.dp), horizontalAlignment = Alignment.End) {
+        Text(
+            text = "Próximo episódio em $countdown s",
+            color = Color.White.copy(alpha = 0.7f),
+            style = ArflixTypography.caption
+        )
+        Text(
+            text = "T$seasonNumber:E$episodeNumber  $episodeTitle",
+            color = Color.White,
+            style = ArflixTypography.cardTitle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            val playFocused = focusedButton == 0
+            Box(
+                modifier = Modifier
+                    .height(46.dp)
+                    .width(220.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(if (playFocused) Color.White else Color.White.copy(alpha = 0.75f))
+                    .border(if (playFocused) 0.dp else 0.dp, Color.Transparent, RoundedCornerShape(4.dp))
+                    .clickable { onPlay() }
+            ) {
+                // A contagem enche o botão da esquerda para a direita.
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .width((220 * (1f - progress)).dp)
+                        .background(Color(0xFFBDBDBD))
+                )
+                Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(24.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Próximo episódio", color = Color.Black, style = ArflixTypography.button)
+                }
+            }
+            val creditsFocused = focusedButton == 1
+            Box(
+                modifier = Modifier
+                    .height(46.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(if (creditsFocused) Color.White else Color.Black.copy(alpha = 0.45f))
+                    .border(2.dp, Color.White.copy(alpha = if (creditsFocused) 0f else 0.7f), RoundedCornerShape(4.dp))
+                    .clickable { onCredits() }
+                    .padding(horizontal = 18.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Assistir créditos", color = if (creditsFocused) Color.Black else Color.White, style = ArflixTypography.button)
             }
         }
     }

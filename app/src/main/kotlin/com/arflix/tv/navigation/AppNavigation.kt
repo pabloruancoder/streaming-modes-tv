@@ -339,7 +339,8 @@ fun AppNavigation(
                     onSwitchProfile = {
                         onSwitchProfile()
                         navController.navigateToProfileSelection()
-                    }
+                    },
+                    onNewPopular = { navController.navigate("nf_new") }
                 )
             }
           } else
@@ -423,6 +424,13 @@ fun AppNavigation(
         composable("nf_search") {
             com.arflix.tv.ui.screens.modes.NetflixSearchScreen(
                 onOpen = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable("nf_new") {
+            com.arflix.tv.ui.screens.modes.NetflixNewPopularScreen(
+                onOpen = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
+                onPlay = { type, id -> navController.navigate(Screen.Details.createRoute(type, id, autoPlay = true)) },
                 onBack = { navController.popBackStack() }
             )
         }

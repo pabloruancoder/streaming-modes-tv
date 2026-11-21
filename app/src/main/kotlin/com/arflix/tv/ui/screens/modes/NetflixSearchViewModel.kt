@@ -51,7 +51,7 @@ internal fun nfNorm(s: String?): String =
         .replace(Regex("[^a-z0-9]+"), " ")
         .trim()
 
-private data class NSGenre(
+internal data class NSGenre(
     val label: String,
     val movie: String?,
     val tv: String?,
@@ -63,7 +63,7 @@ private data class NSGenre(
 )
 
 /** Gêneros do TMDB (ids de filme / série) e os termos que as pessoas digitam. Igual ao addon do PC (src/search.js). */
-private val GENRES = listOf(
+internal val NF_GENRES = listOf(
     NSGenre("Terror", "27", "9648,10765", listOf("terror", "horror", "medo", "assustador", "filme de terror")),
     NSGenre("Ação", "28", "10759", listOf("acao", "action", "aventura", "acao e aventura")),
     NSGenre("Comédia", "35", "35", listOf("comedia", "comedy", "engracado", "humor")),
@@ -95,12 +95,12 @@ private fun matchGenre(q: String): NSGenre? {
     val kind = (LEAD.find(n) ?: TAIL.find(n))?.groupValues?.get(1)
     val only = kind?.let { if (it.startsWith("filme")) "movie" else "tv" }
     n = n.replace(LEAD, "").replace(TAIL, "")
-    return GENRES.firstOrNull { n in it.terms }?.copy(only = only)
+    return NF_GENRES.firstOrNull { n in it.terms }?.copy(only = only)
 }
 
 private fun guessGenre(q: String): NSGenre? {
     val n = nfNorm(q)
-    return if (n.length >= 3) GENRES.firstOrNull { g -> g.terms.any { it.startsWith(n) } } else null
+    return if (n.length >= 3) NF_GENRES.firstOrNull { g -> g.terms.any { it.startsWith(n) } } else null
 }
 
 /**
@@ -355,7 +355,7 @@ internal class NetflixSearchViewModel @Inject constructor() : ViewModel() {
         val n = nfNorm(q)
         val out = mutableListOf<String>()
         fun push(s: String?) { if (!s.isNullOrBlank() && out.none { nfNorm(it) == nfNorm(s) }) out += s }
-        GENRES.forEach { gg -> if (nfNorm(gg.label).startsWith(n) || gg.terms.any { it.startsWith(n) }) push(gg.label) }
+        NF_GENRES.forEach { gg -> if (nfNorm(gg.label).startsWith(n) || gg.terms.any { it.startsWith(n) }) push(gg.label) }
         if (g != null && !g.seriesOnly) { push("${g.label} - filmes"); push("${g.label} - séries") }
         people.forEach(::push)
         // Só nomes em alfabeto latino (o TMDB às vezes devolve o título original em outra escrita).

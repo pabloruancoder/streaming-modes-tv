@@ -79,6 +79,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Brightness4
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forward10
@@ -564,6 +565,12 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
     val skipIntroFocusRequester = remember { FocusRequester() }
     val subtitleSettingsBtnFocusRequester = remember { FocusRequester() }
     val pipButtonFocusRequester = remember { FocusRequester() }
+    // Escurecer tela (Streaming Modes): camada preta sobre o vídeo, 0..8 = 0%..80%, salva entre sessões.
+    val dimButtonFocusRequester = remember { FocusRequester() }
+    val dimPrefs = remember { context.getSharedPreferences("sm_player", android.content.Context.MODE_PRIVATE) }
+    var dimLevel by remember { mutableIntStateOf(dimPrefs.getInt("dim_level", 0).coerceIn(0, 8)) }
+    var dimAdjusting by remember { mutableStateOf(false) }
+    var dimFocused by remember { mutableStateOf(false) }
 
     // Focus state - 0=Play, 1=Subtitles
     var focusedButton by remember { mutableIntStateOf(0) }
@@ -3276,8 +3283,8 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
     }
 
     // Auto-hide controls and return focus to container
-    LaunchedEffect(showControls, isPlaying, isCasting, seekInteraction.phase) {
-        if (showControls && isPlaying && !isCasting && !seekInteraction.browsing && !showSubtitleMenu && !showSourceMenu && !showSubtitleSettings) {
+    LaunchedEffect(showControls, isPlaying, isCasting, seekInteraction.phase, dimAdjusting) {
+        if (showControls && isPlaying && !isCasting && !seekInteraction.browsing && !showSubtitleMenu && !showSourceMenu && !showSubtitleSettings && !dimAdjusting) {
             delay(5000)
             showControls = false
             // Return focus to container so it can receive key events
@@ -4497,6 +4504,9 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
 
         // Buffering indicator - only show after playback has started (mid-stream buffering)
         // Initial buffering is handled by the main loading screen above
+        if (dimLevel > 0 && uiState.selectedStreamUrl != null) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = dimLevel / 10f)))
+        }
         if (isBuffering && hasPlaybackStarted && uiState.selectedStreamUrl != null && !isTouchDevice) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -5125,7 +5135,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                         try { containerFocusRequester.requestFocus() } catch (_: Exception) {}
                                     }
                                 },
-                                onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
+                                onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else dimButtonFocusRequester.requestFocus() },
                                 onRightKey = { subtitleSettingsBtnFocusRequester.requestFocus() },
                                 onDownKey = { trackbarFocusRequester.requestFocus() })
 
@@ -5218,14 +5228,42 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                 onFocusChanged = {},
                                 onClick = cycleAspectRatio,
                                 onLeftKey = { if (isTouchDevice) playButtonFocusRequester.requestFocus() else forwardButtonFocusRequester.requestFocus() },
-                                onRightKey = {
-                                    when {
-                                        args.mediaType == MediaType.TV -> nextEpisodeButtonFocusRequester.requestFocus()
-                                        isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> pipButtonFocusRequester.requestFocus()
-                                        else -> subtitleButtonFocusRequester.requestFocus()
-                                    }
-                                },
+                                onRightKey = { dimButtonFocusRequester.requestFocus() },
                                 onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                            // Escurecer tela: OK abre o ajuste, setas mudam a intensidade, OK fecha.
+                            Spacer(modifier = Modifier.width(gap))
+                            Box(contentAlignment = Alignment.Center) {
+                                fun setDim(v: Int) {
+                                    dimLevel = v.coerceIn(0, 8)
+                                    dimPrefs.edit().putInt("dim_level", dimLevel).apply()
+                                }
+                                PlayerIconButton(icon = Icons.Default.Brightness4, contentDescription = "Escurecer tela",
+                                    focusRequester = dimButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                    onFocusChanged = { dimFocused = it; if (!it) dimAdjusting = false },
+                                    onClick = { dimAdjusting = !dimAdjusting; showControls = true },
+                                    onLeftKey = { if (dimAdjusting) setDim(dimLevel - 1) else aspectButtonFocusRequester.requestFocus() },
+                                    onRightKey = {
+                                        when {
+                                            dimAdjusting -> setDim(dimLevel + 1)
+                                            args.mediaType == MediaType.TV -> nextEpisodeButtonFocusRequester.requestFocus()
+                                            isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> pipButtonFocusRequester.requestFocus()
+                                            else -> subtitleButtonFocusRequester.requestFocus()
+                                        }
+                                    },
+                                    onUpKey = { if (dimAdjusting) setDim(dimLevel + 1) },
+                                    onDownKey = { if (dimAdjusting) setDim(dimLevel - 1) else trackbarFocusRequester.requestFocus() })
+                                if (dimFocused || dimAdjusting) {
+                                    val lift = with(androidx.compose.ui.platform.LocalDensity.current) { (smallBtn + 14.dp).roundToPx() }
+                                    androidx.compose.ui.window.Popup(
+                                        alignment = Alignment.BottomCenter,
+                                        offset = androidx.compose.ui.unit.IntOffset(0, -lift),
+                                        properties = androidx.compose.ui.window.PopupProperties(focusable = false)
+                                    ) {
+                                        DimLevelPanel(level = dimLevel, adjusting = dimAdjusting)
+                                    }
+                                }
+                            }
 
                             if (args.mediaType == MediaType.TV) {
                                 Spacer(modifier = Modifier.width(gap))
@@ -5242,7 +5280,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                             selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
                                         )
                                     },
-                                    onLeftKey = { aspectButtonFocusRequester.requestFocus() },
+                                    onLeftKey = { dimButtonFocusRequester.requestFocus() },
                                     onRightKey = { subtitleButtonFocusRequester.requestFocus() },
                                     onDownKey = { trackbarFocusRequester.requestFocus() })
                             }
@@ -5257,7 +5295,7 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                                     size = smallBtn, iconSize = smallIcon,
                                     onFocusChanged = {},
                                     onClick = { enterPipMode() },
-                                    onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
+                                    onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else dimButtonFocusRequester.requestFocus() },
                                     onRightKey = { subtitleButtonFocusRequester.requestFocus() },
                                     onDownKey = { trackbarFocusRequester.requestFocus() }
                                 )
@@ -8345,4 +8383,28 @@ internal fun shouldOfferNextEpisodeEarly(
     if (remaining <= 3_000L) return false
     val inOutro = skip != null && skip.type.lowercase() in setOf("outro", "ed", "mixed-ed") && positionMs in skip.startMs..skip.endMs
     return inOutro || remaining <= 40_000L
+}
+
+
+/** Painel do "Escurecer tela": 8 níveis (Desligado..80%); aparece acima do botão. */
+@Composable
+private fun DimLevelPanel(level: Int, adjusting: Boolean) {
+    Column(
+        Modifier.background(Color(0xE6141414), RoundedCornerShape(8.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("Escurecer tela", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (adjusting) {
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom) {
+                for (i in 1..8) {
+                    Box(Modifier.size(width = 12.dp, height = (6 + i * 2).dp)
+                        .background(if (i <= level) Color(0xFFE50914) else Color.White.copy(alpha = 0.25f), RoundedCornerShape(2.dp)))
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+        Text(if (level == 0) "Desligado" else "${level * 10}%", color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp)
+        Text(if (adjusting) "\u25C0 \u25B6 ajustar · OK fechar" else "OK para ajustar", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
+    }
 }

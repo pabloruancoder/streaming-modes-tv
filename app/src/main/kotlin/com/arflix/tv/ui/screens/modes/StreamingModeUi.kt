@@ -78,7 +78,8 @@ internal fun StreamingModeHome(
     onPickMode: () -> Unit,
     onBack: () -> Unit,
     onSwitchProfile: () -> Unit = {},
-    onNewPopular: () -> Unit = {}
+    onNewPopular: () -> Unit = {},
+    onDiscover: () -> Unit = {}
 ) {
     var showIntro by remember(mode.key) { mutableStateOf(mode.key !in introPlayed) }
     val catalog = remember(mode.key) { StreamingModes.catalog(mode) }
@@ -102,7 +103,8 @@ internal fun StreamingModeHome(
             onPickMode = onPickMode,
             onSwitchProfile = onSwitchProfile,
             onBack = onBack,
-            onNewPopular = onNewPopular
+            onNewPopular = onNewPopular,
+            onDiscover = onDiscover
         ) else ServiceHomeScreen(
             service = catalog,
             onOpen = onOpen,

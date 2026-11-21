@@ -119,6 +119,7 @@ internal fun NetflixTvHome(
     onSwitchProfile: () -> Unit,
     onBack: () -> Unit,
     onNewPopular: () -> Unit = {},
+    onDiscover: () -> Unit = {},
     viewModel: ServiceHomeViewModel = hiltViewModel(),
     extras: NetflixExtrasViewModel = hiltViewModel()
 ) {
@@ -166,6 +167,7 @@ internal fun NetflixTvHome(
             NavEntry("Séries", Icons.Default.Tv, {}, ServiceHome.Filter.SERIES),
             NavEntry("Filmes", Icons.Default.Movie, {}, ServiceHome.Filter.MOVIES),
             NavEntry("Novidades e populares", Icons.Default.Add, onNewPopular),
+            NavEntry("Descobrir", Icons.Default.Add, onDiscover),
             NavEntry("Minha Netflix", Icons.Default.Add, onMyList),
             NavEntry("Trocar modo", Icons.Default.SwapHoriz, onPickMode),
             NavEntry("Configurações", Icons.Default.Settings, onSettings)

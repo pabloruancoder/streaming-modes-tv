@@ -4507,12 +4507,14 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                         )
                     }
                 },
-                onResolved = { mediaUrl, headers ->
+                onResolved = { mediaUrl, headers, pagePositionMs ->
                     // A página entregou o endereço do vídeo: toca no player do app (imagem, controles e qualidade nativos).
                     uiState.selectedStream?.let { sel ->
                         val hints = (sel.behaviorHints ?: com.arflix.tv.data.model.StreamBehaviorHints())
                             .copy(proxyHeaders = com.arflix.tv.data.model.ProxyHeaders(request = headers), notWebReady = true)
-                        viewModel.selectStream(sel.copy(url = mediaUrl, behaviorHints = hints), uiState.savedPosition.takeIf { it > 0L })
+                        // Se a página já tocou um pedaço (ex.: depois da verificação), continua de onde ela estava.
+                        val startAt = if (pagePositionMs > 5_000L) pagePositionMs else uiState.savedPosition
+                        viewModel.selectStream(sel.copy(url = mediaUrl, behaviorHints = hints), startAt.takeIf { it > 0L })
                     }
                 }
             )

@@ -99,7 +99,7 @@ internal fun EmbedPlayerOverlay(
     onFailed: () -> Unit,
     onExit: () -> Unit,
     /** Endereço do vídeo que a própria página carregou (HLS/MP4) + cabeçalhos: toca no player do app. */
-    onResolved: (url: String, headers: Map<String, String>) -> Unit = { _, _ -> },
+    onResolved: (url: String, headers: Map<String, String>, positionMs: Long) -> Unit = { _, _, _ -> },
     /** Tela de carregamento que tapa a página enquanto ela procura o vídeo escondida. */
     loadingCover: @Composable () -> Unit = { Box(Modifier.fillMaxSize().background(Color.Black)) },
 ) {
@@ -139,13 +139,16 @@ internal fun EmbedPlayerOverlay(
     var cfVisibleSince by remember(embed) { mutableLongStateOf(0L) } // caixa da verificação visível na página
     var cfRect by remember(embed) { mutableStateOf<FloatArray?>(null) } // x, y, w, h em px de CSS
     var progressSince by remember(embed) { mutableLongStateOf(0L) }
+    var srcHandedOver by remember(embed) { mutableStateOf(false) }
     val density = context.resources.displayMetrics.density
     val webView = remember(embed) {
         createEmbedWebView(
             context,
             onChallenge = { if (cfSeenAt == 0L) cfSeenAt = SystemClock.uptimeMillis() }
         ) { url, headers ->
-            if (!resolveGaveUp) onResolvedState(url, headers)
+            // Se a página já tocou um pedaço, o player do app continua de onde ela estava.
+            if (!resolveGaveUp) onResolvedState(url, headers, if (gotProgress) (positionS * 1000).toLong() else 0L)
+            !resolveGaveUp
         }
     }
     fun reveal(reason: String, cursor: Boolean) {
@@ -210,6 +213,25 @@ internal fun EmbedPlayerOverlay(
                         cursorMode = false
                         progressSince = SystemClock.uptimeMillis()
                     }
+                    // Plano B: a página já toca o vídeo e o link não foi pego no caminho (ex.: depois da
+                    // verificação). Usa o endereço que o <video> está tocando (só o principal, > 2 min).
+                    val src = msg.optString("src")
+                    if (src.startsWith("http") && d > 120f && !resolveGaveUp && !srcHandedOver) {
+                        srcHandedOver = true
+                        val ref = msg.optString("ref")
+                        val headers = linkedMapOf<String, String>()
+                        if (ref.startsWith("http")) {
+                            headers["Referer"] = ref
+                            runCatching { android.net.Uri.parse(ref) }.getOrNull()?.let { u ->
+                                headers["Origin"] = "${u.scheme}://${u.host}" + if (u.port > 0) ":${u.port}" else ""
+                            }
+                        }
+                        headers["User-Agent"] = webView.settings.userAgentString
+                        runCatching { CookieManager.getInstance().getCookie(src) }.getOrNull()
+                            ?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
+                        onResolvedState(src, headers, (t * 1000).toLong())
+                        return@post
+                    }
                     if (!resumeDone && d > 0f) {
                         resumeDone = true
                         val start = startPositionMs / 1000f
@@ -248,9 +270,10 @@ internal fun EmbedPlayerOverlay(
             // O site só começa com um "play": manda a cada 2 s nos primeiros 45 s, até tocar.
             if (!playing && !userPaused && nowTick - openedAt < 45_000L && (nowTick - openedAt) % 2_000L < 500L) play()
             val waited = nowTick - openedAt
-            // A página já toca (escondida) mas o endereço do vídeo não apareceu: desiste e mostra a página.
-            val stuckPlaying = gotProgress && progressSince > 0L && nowTick - progressSince > 8_000L
-            if (!resolveGaveUp && (waited > 40_000L || stuckPlaying)) {
+            // Só desiste do player do app quando a página já toca e o endereço não veio de jeito nenhum
+            // (vídeo em blob:). Sem prazo fixo desde a abertura: a verificação pode levar o tempo que for.
+            val stuckPlaying = gotProgress && progressSince > 0L && nowTick - progressSince > 12_000L
+            if (!resolveGaveUp && stuckPlaying) {
                 resolveGaveUp = true
                 send("{type:'sm-bridge:cmd',cmd:'unmute'}")
                 reveal("", cursor = false)
@@ -518,7 +541,8 @@ private val AD_HOSTS = listOf(
 private fun createEmbedWebView(
     context: android.content.Context,
     onChallenge: () -> Unit = {},
-    onMedia: (url: String, headers: Map<String, String>) -> Unit
+    /** Devolve false se o app não aceitou (aí o próximo vídeo pedido ainda pode ser usado). */
+    onMedia: (url: String, headers: Map<String, String>) -> Boolean
 ): WebView = WebView(context).apply {
     val resolved = java.util.concurrent.atomic.AtomicBoolean(false)
     val main = Handler(Looper.getMainLooper())
@@ -576,10 +600,12 @@ private fun createEmbedWebView(
                 runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
                     ?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
                 if (isHls) {
-                    if (resolved.compareAndSet(false, true)) main.post { onMedia(url, headers) }
+                    if (resolved.compareAndSet(false, true)) main.post { if (!onMedia(url, headers)) resolved.set(false) }
                 } else {
                     // MP4 pode ser anúncio em vídeo: só usa se nenhuma lista HLS aparecer em 6 s.
-                    main.postDelayed({ if (resolved.compareAndSet(false, true)) onMedia(url, headers) }, 6_000L)
+                    main.postDelayed({
+                        if (resolved.compareAndSet(false, true) && !onMedia(url, headers)) resolved.set(false)
+                    }, 6_000L)
                 }
             }
             return null
@@ -609,8 +635,10 @@ private val BRIDGE_JS = """
       var d=v.duration; if (!best || (isFinite(d) && d>(best.duration||0))) best=v; }); cur=best; return cur; }
   function clear(v){ var e=v; while (e && e!==document.documentElement) { try { e.style.setProperty('background','transparent','important'); } catch(x){} e=e.parentElement; } }
   function post(v){ if (!v) return; var d=v.duration; if (!isFinite(d)||d<=0) return;
+    // Endereço do vídeo que está tocando (se for um link de verdade, não blob:): o app usa como plano B.
+    var src = (v.currentSrc && /^https?:/i.test(v.currentSrc)) ? v.currentSrc : '';
     try { window.top.postMessage({type:'sm-bridge:progress', currentTime:v.currentTime, duration:d,
-      state: v.ended?'ended':(v.paused?'paused':'playing')}, '*'); } catch(e){} }
+      state: v.ended?'ended':(v.paused?'paused':'playing'), src:src, ref:location.href}, '*'); } catch(e){} }
   // Sem som enquanto o app procura o endereço do vídeo (ele toca no player do app); 'unmute' devolve o som.
   setInterval(function(){ var v=pick(); if (v) { if (!window.__smUnmuted) v.muted=true; clear(v); post(v); } }, 500);
   // Verificação da Cloudflare: avisa o app se a caixa "Confirme que é humano" está visível e onde.

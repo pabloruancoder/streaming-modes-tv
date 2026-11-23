@@ -34,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -96,6 +98,7 @@ private sealed class KChip(val label: String) {
     object Surprise : KChip("Surpreenda-me")
     object Refresh : KChip("Atualizar")
     object Calendar : KChip("Calendário")
+    object Dub : KChip("Só dublados")
     class Country(val country: DoramaCountry) : KChip(country.label)
 }
 
@@ -126,9 +129,15 @@ internal fun NetflixDoramasScreen(
     // Calendário da semana: troca as fileiras da página pelas do calendário (Voltar sai dele).
     var calendarOn by rememberSaveable { mutableStateOf(false) }
     var homeRowIndex by rememberSaveable { mutableIntStateOf(0) }
-    val rows = if (calendarOn) calRows else homeRows
+    val dubOnly by viewModel.dubOnly.collectAsStateWithLifecycle()
+    val dubScan by viewModel.dubScan.collectAsStateWithLifecycle()
+    val ratings by viewModel.ratings.collectAsStateWithLifecycle()
+    val audioMap by viewModel.audio.collectAsStateWithLifecycle()
+    val baseRows = if (calendarOn) calRows else homeRows
+    // "Só dublados": mostra só o que as fontes confirmaram com áudio em português.
+    val rows = if (!dubOnly) baseRows else baseRows.map { r -> r.copy(items = r.items.filter { audioMap[it.key] == "Dublado" }) }.filter { it.items.isNotEmpty() }
     val loading = if (calendarOn) calLoading else homeLoading
-    // Menu ☰: "Não tenho interesse" (num dorama) ou "Mostrar escondidos" (na barra). Opção 0 = ação, 1 = cancelar.
+    // Menu ☰: num dorama = gostei / não gostei / não tenho interesse; na barra = mostrar escondidos.
     var menuItem by remember { mutableStateOf<DItem?>(null) }
     var menuRestore by remember { mutableStateOf(false) }
     var menuOption by remember { mutableIntStateOf(0) }
@@ -154,9 +163,9 @@ internal fun NetflixDoramasScreen(
         viewModel.start(seeds, resumeList, myList)
     }
 
-    val chips = remember { listOf(KChip.Surprise, KChip.Refresh, KChip.Calendar) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
+    val chips = remember { listOf(KChip.Surprise, KChip.Refresh, KChip.Calendar, KChip.Dub) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
     var inBar by rememberSaveable { mutableStateOf(false) }
-    var chipIndex by rememberSaveable { mutableIntStateOf(3) }
+    var chipIndex by rememberSaveable { mutableIntStateOf(4) }
     var rowIndex by rememberSaveable { mutableIntStateOf(0) }
     val cols = remember { mutableStateMapOf<String, Int>() }
 
@@ -180,6 +189,26 @@ internal fun NetflixDoramasScreen(
         val current = item ?: return@LaunchedEffect
         delay(2_500)
         viewModel.wantAudio(current)
+        // Já vai descobrindo os próximos da fileira (selo nas capas).
+        row?.items?.drop(col + 1)?.take(2)?.forEach { viewModel.wantAudio(it) }
+    }
+
+    // "Só dublados" ligado: quando as fileiras mudam (país, calendário, carregamento), verifica as novas também.
+    LaunchedEffect(dubOnly, calendarOn, baseRows.size, country.label) {
+        if (dubOnly) viewModel.setDubOnly(true, baseRows)
+    }
+
+    // Lista do menu ☰ (rótulo -> ação), montada na hora de abrir.
+    fun menuOptions(): List<Pair<String, () -> Unit>> {
+        val target = menuItem
+        if (target == null) return listOf("Mostrar de novo" to { viewModel.restoreHidden() }, "Cancelar" to {})
+        val r = ratings[target.key]?.second ?: 0
+        return listOf(
+            (if (r > 0) "Tirar o \uD83D\uDC4D Gostei" else "\uD83D\uDC4D Gostei") to { viewModel.rate(target, if (r > 0) 0 else 1) },
+            (if (r < 0) "Tirar o \uD83D\uDC4E Não gostei" else "\uD83D\uDC4E Não gostei") to { viewModel.rate(target, if (r < 0) 0 else -1) },
+            "Não tenho interesse" to { viewModel.hide(target) },
+            "Cancelar" to {}
+        )
     }
 
     fun toggleCalendar() {
@@ -199,6 +228,7 @@ internal fun NetflixDoramasScreen(
             KChip.Surprise -> viewModel.surprise()?.let { onOpen(it.type, it.id) }
             KChip.Refresh -> { if (calendarOn) { calendarOn = false; rowIndex = homeRowIndex }; viewModel.refresh() }
             KChip.Calendar -> toggleCalendar()
+            KChip.Dub -> viewModel.setDubOnly(!dubOnly, baseRows)
             is KChip.Country -> { viewModel.setCountry(c.country); if (calendarOn) viewModel.loadCalendar() }
         }
     }
@@ -214,15 +244,14 @@ internal fun NetflixDoramasScreen(
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent true
                 if (showIntro) return@onPreviewKeyEvent ev.key != Key.Back
                 if (menuItem != null || menuRestore) {
+                    val opts = menuOptions()
                     when (ev.key) {
-                        Key.DirectionUp -> menuOption = 0
-                        Key.DirectionDown -> menuOption = 1
+                        Key.DirectionUp -> menuOption = (menuOption - 1).coerceAtLeast(0)
+                        Key.DirectionDown -> menuOption = (menuOption + 1).coerceAtMost(opts.size - 1)
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                            if (menuOption == 0) {
-                                menuItem?.let { viewModel.hide(it) }
-                                if (menuRestore) viewModel.restoreHidden()
-                            }
+                            val action = opts.getOrNull(menuOption)?.second
                             menuItem = null; menuRestore = false
+                            action?.invoke()
                         }
                         Key.Back, Key.Menu -> { menuItem = null; menuRestore = false }
                         else -> {}
@@ -231,7 +260,7 @@ internal fun NetflixDoramasScreen(
                 }
                 if (ev.key == Key.Menu) {
                     menuOption = 0
-                    if (inBar) { if (hidden.isNotEmpty()) menuRestore = true } else menuItem = item
+                    if (inBar) { if (hidden.isNotEmpty()) menuRestore = true } else if (item != null) menuItem = item
                     return@onPreviewKeyEvent true
                 }
                 if (ev.key == Key.Back && calendarOn) { toggleCalendar(); return@onPreviewKeyEvent true }
@@ -289,6 +318,8 @@ internal fun NetflixDoramasScreen(
                 Spacer(Modifier.height(12.dp))
                 if (item == null) {
                     Text(when {
+                        dubOnly && dubScan.first < dubScan.second -> "Procurando doramas dublados nas suas fontes… (${dubScan.first} de ${dubScan.second})"
+                        dubOnly -> "Nenhum dorama dublado encontrado nas suas fontes."
                         calendarOn && loading -> "Montando o calendário da semana…"
                         calendarOn -> "Nenhum episódio marcado para esta semana."
                         loading -> "Separando os melhores doramas para você…"
@@ -334,6 +365,11 @@ internal fun NetflixDoramasScreen(
                         Text(kRating(item.vote), color = DoramaPink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(10.dp))
                     }
+                    when (ratings[item.key]?.second) {
+                        1 -> { Text("\uD83D\uDC4D", fontSize = 12.sp); Spacer(Modifier.width(6.dp)) }
+                        -1 -> { Text("\uD83D\uDC4E", fontSize = 12.sp); Spacer(Modifier.width(6.dp)) }
+                        else -> {}
+                    }
                     audio[item.key]?.let { a ->
                         Text(a.uppercase(), color = DoramaPink, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp,
                             modifier = Modifier.border(1.dp, DoramaPink, RoundedCornerShape(3.dp)).padding(horizontal = 5.dp, vertical = 1.dp))
@@ -351,20 +387,20 @@ internal fun NetflixDoramasScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     KHint("Mais informações", Icons.Default.Info, primary = false)
                     KHint(if (row?.id == NetflixDoramasViewModel.CONT_ROW) "Continuar" else "Assistir", Icons.Default.PlayArrow, primary = true)
-                    KHint("Não tenho interesse", Icons.Default.Menu, primary = false)
+                    KHint("Gostei / Não tenho interesse", Icons.Default.Menu, primary = false)
                 }
             }
         }
 
         // ---- Barra: Surpreenda-me, Atualizar e países ----
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(start = 52.dp, top = 20.dp)
         ) {
             chips.forEachIndexed { i, c ->
                 val focused = inBar && i == chipIndex
-                val selected = (c is KChip.Country && c.country.label == country.label) || (c is KChip.Calendar && calendarOn)
+                val selected = (c is KChip.Country && c.country.label == country.label) || (c is KChip.Calendar && calendarOn) || (c is KChip.Dub && dubOnly)
                 val bg = when {
                     focused -> DoramaPink
                     selected -> DoramaPink.copy(alpha = 0.25f)
@@ -374,12 +410,12 @@ internal fun NetflixDoramasScreen(
                 Row(
                     Modifier.background(bg, RoundedCornerShape(50))
                         .border(1.dp, if (focused || selected) DoramaPink else PinkSoft.copy(alpha = 0.35f), RoundedCornerShape(50))
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                        .padding(horizontal = 11.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val icon = when (c) {
                         KChip.Surprise -> Icons.Default.Shuffle; KChip.Refresh -> Icons.Default.Refresh
-                        KChip.Calendar -> Icons.Default.DateRange; else -> null
+                        KChip.Calendar -> Icons.Default.DateRange; KChip.Dub -> Icons.Default.RecordVoiceOver; else -> null
                     }
                     if (icon != null) {
                         Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
@@ -388,6 +424,11 @@ internal fun NetflixDoramasScreen(
                     Text(c.label, color = fg, fontSize = 13.sp, fontWeight = if (focused || selected) FontWeight.Bold else FontWeight.Medium)
                 }
             }
+        }
+
+        if (dubOnly && dubScan.first < dubScan.second && rows.isNotEmpty()) {
+            Text("Verificando dublados… ${dubScan.first} de ${dubScan.second}", color = PinkSoft.copy(alpha = 0.7f), fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 62.dp, end = 56.dp))
         }
 
         // ---- Fileiras ----
@@ -418,7 +459,7 @@ internal fun NetflixDoramasScreen(
                             itemsIndexed(r.items, key = { _, it -> it.key }) { j, it ->
                                 val f = focusedRow && j == c
                                 if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress,
-                                    if (it.key in newEp) "NOVO EPISÓDIO" else airing[it.key], f, r.rating)
+                                    if (it.key in newEp) "NOVO EPISÓDIO" else airing[it.key], audioMap[it.key], f, r.rating)
                             }
                         }
                         Box(Modifier.width(56.dp).height(if (r.ranked) 160.dp else 110.dp)
@@ -435,10 +476,10 @@ internal fun NetflixDoramasScreen(
                     Text(if (target != null) (titles[target.key] ?: target.title) else "Doramas escondidos",
                         color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(4.dp))
-                    Text(if (target != null) "Some da aba Doramas e não volta nas recomendações." else "Você escondeu ${hidden.size} da aba.",
+                    Text(if (target != null) "Gostei / Não gostei ajusta as recomendações. \"Não tenho interesse\" tira da aba." else "Você escondeu ${hidden.size} da aba.",
                         color = PinkSoft.copy(alpha = 0.8f), fontSize = 13.sp)
                     Spacer(Modifier.height(14.dp))
-                    listOf(if (target != null) "Não tenho interesse" else "Mostrar de novo", "Cancelar").forEachIndexed { i, label ->
+                    menuOptions().map { it.first }.forEachIndexed { i, label ->
                         val f = i == menuOption
                         Text(label, color = if (f) Color.White else Color.White.copy(alpha = 0.75f), fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
@@ -512,7 +553,7 @@ private fun KHint(text: String, icon: ImageVector, primary: Boolean) {
 }
 
 @Composable
-private fun KCard(item: DItem, name: String, progress: Int?, airing: String?, focused: Boolean, showRating: Boolean) {
+private fun KCard(item: DItem, name: String, progress: Int?, airing: String?, audio: String?, focused: Boolean, showRating: Boolean) {
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(160), label = "kc")
     Box(
         Modifier.zIndex(if (focused) 1f else 0f).scale(scale).size(width = 176.dp, height = 99.dp).clip(RoundedCornerShape(6.dp))
@@ -526,12 +567,20 @@ private fun KCard(item: DItem, name: String, progress: Int?, airing: String?, fo
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = if (hasBar) 12.dp else 6.dp))
         if (hasBar) PinkProgress(progress!!, Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 5.dp))
         if (airing != null) AiringPill(airing, Modifier.align(Alignment.TopStart).padding(5.dp), small = true)
-        if (showRating && item.vote > 0) {
-            Row(Modifier.align(Alignment.TopEnd).padding(5.dp).background(Plum.copy(alpha = 0.8f), RoundedCornerShape(3.dp))
-                .padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Star, contentDescription = null, tint = DoramaPink, modifier = Modifier.size(10.dp))
-                Spacer(Modifier.width(2.dp))
-                Text(kRating(item.vote), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Column(Modifier.align(Alignment.TopEnd).padding(5.dp), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (showRating && item.vote > 0) {
+                Row(Modifier.background(Plum.copy(alpha = 0.8f), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Star, contentDescription = null, tint = DoramaPink, modifier = Modifier.size(10.dp))
+                    Spacer(Modifier.width(2.dp))
+                    Text(kRating(item.vote), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (audio != null) {
+                Text(if (audio == "Dublado") "DUB" else "LEG", color = if (audio == "Dublado") Color.White else PinkSoft, fontSize = 9.sp,
+                    fontWeight = FontWeight.Black, letterSpacing = 1.sp,
+                    modifier = Modifier.background(if (audio == "Dublado") DoramaPink else Plum.copy(alpha = 0.85f), RoundedCornerShape(3.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp))
             }
         }
     }

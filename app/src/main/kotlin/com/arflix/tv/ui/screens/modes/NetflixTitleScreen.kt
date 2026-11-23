@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.ViewModule
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -80,6 +82,12 @@ import kotlinx.coroutines.delay
 
 private val NRed = Color(0xFFE50914)
 
+/** Cores da página do título: Netflix (preto/vermelho) ou Doramas (ameixa/rosa, quando aberta pela aba Doramas). */
+private data class TitleTheme(val bg: Color, val accent: Color, val focusBg: Color, val focusFg: Color)
+private val NetflixTitleTheme = TitleTheme(Color.Black, NRed, Color.White, Color.Black)
+private val DoramaTitleTheme = TitleTheme(Color(0xFF16070F), DoramaPink, DoramaPink, Color.White)
+private val LocalTitleTheme = staticCompositionLocalOf { NetflixTitleTheme }
+
 private enum class TitlePane { MAIN, EPISODES, SIMILAR, SOURCES }
 
 private data class TitleAction(val label: String, val icon: ImageVector, val run: () -> Unit, val progress: Float? = null)
@@ -103,6 +111,8 @@ internal fun NetflixTitleScreen(
     onPlayStream: (identity: EpisodeIdentity?, imdbId: String?, startPositionMs: Long?, stream: com.arflix.tv.data.model.StreamSource) -> Unit = { _, _, _, _ -> },
     onOpenTitle: (MediaType, Int) -> Unit,
     onBack: () -> Unit,
+    /** Aberta a partir da aba Doramas: página em rosa. */
+    pink: Boolean = false,
     viewModel: DetailsViewModel = hiltViewModel()
 ) {
     LaunchedEffect(mediaType, mediaId) { viewModel.loadDetails(mediaType, mediaId, initialSeason, initialEpisode) }
@@ -192,10 +202,11 @@ internal fun NetflixTitleScreen(
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { repeat(10) { if (runCatching { focus.requestFocus() }.isSuccess) return@LaunchedEffect; delay(100) } }
 
+    CompositionLocalProvider(LocalTitleTheme provides if (pink) DoramaTitleTheme else NetflixTitleTheme) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(LocalTitleTheme.current.bg)
             .focusRequester(focus)
             .focusable()
             .onPreviewKeyEvent { ev ->
@@ -263,11 +274,12 @@ internal fun NetflixTitleScreen(
             if (pane == TitlePane.MAIN && state.trailerKey != null) {
                 TrailerPlayer(youtubeKey = state.trailerKey!!, delayMs = 2500L, volume = 0f, modifier = Modifier.fillMaxSize())
             }
-            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Color.Black, 0.4f to Color.Black.copy(alpha = 0.6f), 0.75f to Color.Transparent)))
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to Color.Black)))
+            val bg = LocalTitleTheme.current.bg
+            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to bg, 0.4f to bg.copy(alpha = 0.6f), 0.75f to Color.Transparent)))
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to bg)))
         }
         if (pane == TitlePane.EPISODES || pane == TitlePane.SOURCES) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.88f)))
+            Box(Modifier.fillMaxSize().background(LocalTitleTheme.current.bg.copy(alpha = 0.88f)))
         }
 
         when (pane) {
@@ -328,6 +340,7 @@ internal fun NetflixTitleScreen(
             }
         }
     }
+    }
 }
 
 private val TITLE_KEYS = setOf(
@@ -372,11 +385,11 @@ private fun TitleButton(a: TitleAction, focused: Boolean) {
     Row(
         Modifier
             .widthIn(min = 260.dp)
-            .background(if (focused) Color.White else Color.Transparent, RoundedCornerShape(4.dp))
+            .background(if (focused) LocalTitleTheme.current.focusBg else Color.Transparent, RoundedCornerShape(4.dp))
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val fg = if (focused) Color.Black else Color.White.copy(alpha = 0.85f)
+        val fg = if (focused) LocalTitleTheme.current.focusFg else Color.White.copy(alpha = 0.85f)
         Icon(a.icon, contentDescription = null, tint = fg, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(12.dp))
         Text(a.label, color = fg, fontSize = 15.sp, fontWeight = if (focused) FontWeight.Bold else FontWeight.Medium)
@@ -407,12 +420,12 @@ private fun EpisodesPane(
                 val selected = n == currentSeason
                 Text(
                     "Temporada $n",
-                    color = when { focused -> Color.Black; selected -> Color.White; else -> Color.White.copy(alpha = 0.55f) },
+                    color = when { focused -> LocalTitleTheme.current.focusFg; selected -> Color.White; else -> Color.White.copy(alpha = 0.55f) },
                     fontSize = 15.sp,
                     fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium,
                     modifier = Modifier
                         .padding(vertical = 2.dp)
-                        .background(if (focused) Color.White else Color.Transparent, RoundedCornerShape(4.dp))
+                        .background(if (focused) LocalTitleTheme.current.focusBg else Color.Transparent, RoundedCornerShape(4.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 )
             }
@@ -440,7 +453,7 @@ private fun EpisodeRow(e: Episode, focused: Boolean, progress: Int?) {
             .scale(scale)
             .padding(vertical = 5.dp)
             .background(if (focused) Color.White.copy(alpha = 0.12f) else Color.Transparent, RoundedCornerShape(6.dp))
-            .border(if (focused) 2.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(6.dp))
+            .border(if (focused) 2.dp else 0.dp, if (focused) LocalTitleTheme.current.focusBg else Color.Transparent, RoundedCornerShape(6.dp))
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -451,7 +464,7 @@ private fun EpisodeRow(e: Episode, focused: Boolean, progress: Int?) {
             val shown = if (e.isWatched) 100 else progress
             if (shown != null && shown > 0) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.3f))) {
-                    Box(Modifier.fillMaxWidth(shown.coerceAtMost(100) / 100f).height(3.dp).background(NRed))
+                    Box(Modifier.fillMaxWidth(shown.coerceAtMost(100) / 100f).height(3.dp).background(LocalTitleTheme.current.accent))
                 }
             }
         }
@@ -480,7 +493,7 @@ private fun SimilarCard(item: MediaItem, logo: String?, focused: Boolean) {
             .size(width = 176.dp, height = 99.dp)
             .clip(RoundedCornerShape(4.dp))
             .background(Color(0xFF232323))
-            .border(if (focused) 3.dp else 0.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(4.dp))
+            .border(if (focused) 3.dp else 0.dp, if (focused) LocalTitleTheme.current.focusBg else Color.Transparent, RoundedCornerShape(4.dp))
     ) {
         AsyncImage(model = item.backdrop ?: item.image, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.7f))))
@@ -522,15 +535,15 @@ private fun SourcesPane(
                 val info = com.arflix.tv.ui.screens.player.loadingSourceInfo(st)
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                        .background(if (focused) Color.White else Color.White.copy(alpha = 0.05f), RoundedCornerShape(6.dp))
+                        .background(if (focused) LocalTitleTheme.current.focusBg else Color.White.copy(alpha = 0.05f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 ) {
-                    Text(info.first, color = if (focused) Color.Black else Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                    Text(info.first, color = if (focused) LocalTitleTheme.current.focusFg else Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (info.second.isNotBlank()) Text(info.second, color = if (focused) Color.Black.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.6f),
+                    if (info.second.isNotBlank()) Text(info.second, color = if (focused) LocalTitleTheme.current.focusFg.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.6f),
                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val name = st.behaviorHints?.filename ?: st.source
-                    if (name.isNotBlank()) Text(name, color = if (focused) Color.Black.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.4f),
+                    if (name.isNotBlank()) Text(name, color = if (focused) LocalTitleTheme.current.focusFg.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.4f),
                         fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }

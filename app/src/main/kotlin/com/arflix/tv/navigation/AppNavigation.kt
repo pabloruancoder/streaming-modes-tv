@@ -789,7 +789,9 @@ fun AppNavigation(
                         )
                     },
                     onOpenTitle = { type, id -> navController.navigate(Screen.Details.createRoute(type, id)) },
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    // Aberta a partir da aba Doramas (ela está na pilha): página em rosa.
+                    pink = remember(backStackEntry) { runCatching { navController.getBackStackEntry("nf_doramas") }.isSuccess }
                 )
                 return@composable
             }

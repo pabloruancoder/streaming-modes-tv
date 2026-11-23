@@ -116,6 +116,17 @@ internal class NetflixDoramasViewModel @Inject constructor(
     private val _hidden = MutableStateFlow(prefs.getStringSet("hidden", emptySet()).orEmpty().toSet())
     val hidden: StateFlow<Set<String>> = _hidden.asStateFlow()
 
+    /** Curtidas: chave do item -> (nome, +1 gostei / -1 não gostei). Guardado no aparelho. */
+    private val _ratings = MutableStateFlow(loadRatings())
+    val ratings: StateFlow<Map<String, Pair<String, Int>>> = _ratings.asStateFlow()
+
+    // "Só dublados": verifica nas fontes os doramas das fileiras, poucos de cada vez.
+    private val _dubOnly = MutableStateFlow(false)
+    val dubOnly: StateFlow<Boolean> = _dubOnly.asStateFlow()
+    private val _dubScan = MutableStateFlow(0 to 0) // verificados, total
+    val dubScan: StateFlow<Pair<Int, Int>> = _dubScan.asStateFlow()
+    private var dubJob: Job? = null
+
     /** As mesmas configurações de trailer da Home (tocar sozinho, som, atraso). */
     val trailerSettings: StateFlow<ServiceHomeTrailerSettings> = observeHomeProfilePreferences(
         activeProfileId = profileManager.activeProfileId,
@@ -134,7 +145,7 @@ internal class NetflixDoramasViewModel @Inject constructor(
     private val titleAsked = ConcurrentHashMap.newKeySet<String>()
     private val trailerAsked = ConcurrentHashMap.newKeySet<String>()
     private val audioAsked = ConcurrentHashMap.newKeySet<String>()
-    private val audioGate = Semaphore(1)
+    private val audioGate = Semaphore(2)
 
     // "Todos os doramas": paginação sem fim.
     private var allPage = 0
@@ -261,18 +272,26 @@ internal class NetflixDoramasViewModel @Inject constructor(
      * em alguma fonte = "Dublado"; só fontes sem português = "Legendado". Sem fontes, não mostra nada.
      */
     fun wantAudio(item: DItem) {
+        if (item.key in _audio.value || item.key in audioAsked) return
+        viewModelScope.launch { checkAudio(item) }
+    }
+
+    private suspend fun checkAudio(item: DItem) {
         if (!audioAsked.add(item.key)) return
-        viewModelScope.launch {
+        var found = false
+        try {
             audioGate.withPermit {
                 val imdb = if (item.type == MediaType.MOVIE) tmdb("/movie/${item.id}")?.optString("imdb_id")
                 else tmdb("/tv/${item.id}/external_ids", lang = false)?.optString("imdb_id")
-                if (imdb.isNullOrBlank() || !imdb.startsWith("tt")) return@withPermit
+                if (imdb.isNullOrBlank() || !imdb.startsWith("tt")) { found = true; return@withPermit }
                 val result = withTimeoutOrNull(25_000) {
                     runCatching {
                         if (item.type == MediaType.MOVIE) streamRepository.resolveMovieStreams(imdb, item.title, item.year.toIntOrNull())
                         else streamRepository.resolveEpisodeStreams(imdb, 1, 1, tmdbId = item.id, title = item.title)
                     }.getOrElse { if (it is CancellationException) throw it; null }
-                } ?: return@withPermit
+                }
+                found = true
+                if (result == null) return@withPermit
                 val label = when {
                     result.streams.any { isPortugueseStream(it) } -> "Dublado"
                     result.streams.any { !EmbedSources.isEmbedStream(it) } -> "Legendado"
@@ -280,8 +299,40 @@ internal class NetflixDoramasViewModel @Inject constructor(
                 }
                 label?.let { _audio.value = _audio.value + (item.key to it) }
             }
+        } finally {
+            // Cancelado no meio (filtro desligado): pode verificar de novo depois.
+            if (!found) audioAsked.remove(item.key)
         }
     }
+
+    /** Liga/desliga "Só dublados". Ligado, verifica os primeiros de cada fileira (os já vistos não repetem). */
+    fun setDubOnly(on: Boolean, rows: List<DRow>) {
+        _dubOnly.value = on
+        dubJob?.cancel()
+        if (!on) return
+        val items = rows.flatMap { r -> r.items.take(if (r.id == ALL_ROW) 20 else 12) }.distinctBy { it.key }
+        _dubScan.value = items.count { it.key in _audio.value } to items.size
+        dubJob = viewModelScope.launch {
+            items.filter { it.key !in _audio.value }.mapLimit(2) { item ->
+                checkAudio(item)
+                _dubScan.value = (_dubScan.value.first + 1) to _dubScan.value.second
+            }
+        }
+    }
+
+    /** Gostei (+1), não gostei (-1) ou tira a avaliação (0). */
+    fun rate(item: DItem, value: Int) {
+        val name = _titles.value[item.key] ?: item.title
+        _ratings.value = if (value == 0) _ratings.value - item.key else _ratings.value + (item.key to (name to value))
+        val json = JSONObject()
+        _ratings.value.forEach { (k, v) -> json.put(k, JSONObject().put("t", v.first).put("v", v.second)) }
+        prefs.edit().putString("ratings", json.toString()).apply()
+    }
+
+    private fun loadRatings(): Map<String, Pair<String, Int>> = runCatching {
+        val json = JSONObject(context.getSharedPreferences("sm_doramas", Context.MODE_PRIVATE).getString("ratings", null) ?: return emptyMap())
+        json.keys().asSequence().associateWith { k -> json.getJSONObject(k).let { it.optString("t") to it.optInt("v") } }
+    }.getOrDefault(emptyMap())
 
     /** Chamado quando a pessoa chega perto do fim da fileira "Todos os doramas". */
     fun loadMoreAll() {
@@ -376,17 +427,28 @@ internal class NetflixDoramasViewModel @Inject constructor(
         )
 
         // "Porque você assistiu/salvou": até 3 fileiras, dos doramas da pessoa primeiro.
-        val becauseSeeds = (lib.filter { it.item.type == MediaType.TV }.map { Triple(it.item.id, titleOf(it.item), it.fromHistory) } +
-            seeds.filter { it.type == MediaType.TV }.map { Triple(it.id, it.name, true) })
+        val rated = _ratings.value
+        val disliked = rated.filterValues { it.second < 0 }.keys
+        val likedTv = rated.filter { it.value.second > 0 && it.key.startsWith("${MediaType.TV}_") }
+            .mapNotNull { (k, v) -> k.substringAfter('_').toIntOrNull()?.let { it to v.first } }
+        // 0 = gostou, 1 = assistiu, 2 = salvou.
+        val becauseSeeds = (likedTv.map { Triple(it.first, it.second, 0) } +
+            lib.filter { it.item.type == MediaType.TV && it.item.key !in disliked }.map { Triple(it.item.id, titleOf(it.item), if (it.fromHistory) 1 else 2) } +
+            seeds.filter { it.type == MediaType.TV && "${MediaType.TV}_${it.id}" !in disliked }.map { Triple(it.id, it.name, 1) })
             .distinctBy { it.first }
         val because = if (becauseSeeds.isEmpty()) emptyList() else {
-            val start = (round * 3).mod(becauseSeeds.size)
-            (becauseSeeds.drop(start) + becauseSeeds.take(start)).take(3).mapIndexed { i, (id, name, watched) ->
-                Spec("because$i", if (watched) "Porque você assistiu $name" else "Porque você salvou $name") { similar(id) }
+            // Os curtidos ficam sempre; o resto gira a cada "Atualizar".
+            val liked = becauseSeeds.filter { it.third == 0 }.take(2)
+            val rest = becauseSeeds.filter { it.third != 0 }
+            val start = if (rest.isEmpty()) 0 else (round * 3).mod(rest.size)
+            (liked + rest.drop(start) + rest.take(start)).take(3).mapIndexed { i, (id, name, why) ->
+                val title = when (why) { 0 -> "Porque você gostou de $name"; 1 -> "Porque você assistiu $name"; else -> "Porque você salvou $name" }
+                Spec("because$i", title) { similar(id) }
             }
         }
-        // Atores que mais aparecem nos doramas da pessoa.
-        val libTv = lib.filter { it.item.type == MediaType.TV }.map { it.item.id }.take(8)
+        // Atores que mais aparecem nos doramas da pessoa (os curtidos primeiro).
+        val libTv = (likedTv.map { it.first } + lib.filter { it.item.type == MediaType.TV && it.item.key !in disliked }.map { it.item.id })
+            .distinct().take(8)
         val actors = if (libTv.isEmpty()) emptyList() else (0 until 2).map { i ->
             Spec("actor$i", "") { actorRow(libTv, i) }
         }

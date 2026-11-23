@@ -31,7 +31,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -93,6 +95,7 @@ private val PlumCard = Color(0xFF2A0F1F)  // capa sem imagem / esqueleto
 private sealed class KChip(val label: String) {
     object Surprise : KChip("Surpreenda-me")
     object Refresh : KChip("Atualizar")
+    object Calendar : KChip("Calendário")
     class Country(val country: DoramaCountry) : KChip(country.label)
 }
 
@@ -114,8 +117,21 @@ internal fun NetflixDoramasScreen(
     viewModel: NetflixDoramasViewModel = hiltViewModel(),
     extras: NetflixExtrasViewModel = hiltViewModel()
 ) {
-    val rows by viewModel.rows.collectAsStateWithLifecycle()
-    val loading by viewModel.loading.collectAsStateWithLifecycle()
+    val homeRows by viewModel.rows.collectAsStateWithLifecycle()
+    val homeLoading by viewModel.loading.collectAsStateWithLifecycle()
+    val calRows by viewModel.calendar.collectAsStateWithLifecycle()
+    val calLoading by viewModel.calLoading.collectAsStateWithLifecycle()
+    val newEp by viewModel.newEp.collectAsStateWithLifecycle()
+    val hidden by viewModel.hidden.collectAsStateWithLifecycle()
+    // Calendário da semana: troca as fileiras da página pelas do calendário (Voltar sai dele).
+    var calendarOn by rememberSaveable { mutableStateOf(false) }
+    var homeRowIndex by rememberSaveable { mutableIntStateOf(0) }
+    val rows = if (calendarOn) calRows else homeRows
+    val loading = if (calendarOn) calLoading else homeLoading
+    // Menu ☰: "Não tenho interesse" (num dorama) ou "Mostrar escondidos" (na barra). Opção 0 = ação, 1 = cancelar.
+    var menuItem by remember { mutableStateOf<DItem?>(null) }
+    var menuRestore by remember { mutableStateOf(false) }
+    var menuOption by remember { mutableIntStateOf(0) }
     val country by viewModel.country.collectAsStateWithLifecycle()
     val info by viewModel.info.collectAsStateWithLifecycle()
     val progress by viewModel.progress.collectAsStateWithLifecycle()
@@ -138,9 +154,9 @@ internal fun NetflixDoramasScreen(
         viewModel.start(seeds, resumeList, myList)
     }
 
-    val chips = remember { listOf(KChip.Surprise, KChip.Refresh) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
+    val chips = remember { listOf(KChip.Surprise, KChip.Refresh, KChip.Calendar) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
     var inBar by rememberSaveable { mutableStateOf(false) }
-    var chipIndex by rememberSaveable { mutableIntStateOf(2) }
+    var chipIndex by rememberSaveable { mutableIntStateOf(3) }
     var rowIndex by rememberSaveable { mutableIntStateOf(0) }
     val cols = remember { mutableStateMapOf<String, Int>() }
 
@@ -166,11 +182,24 @@ internal fun NetflixDoramasScreen(
         viewModel.wantAudio(current)
     }
 
+    fun toggleCalendar() {
+        if (calendarOn) {
+            calendarOn = false
+            rowIndex = homeRowIndex
+        } else {
+            homeRowIndex = rowIndex
+            rowIndex = 0
+            calendarOn = true
+            viewModel.loadCalendar()
+        }
+    }
+
     fun pressChip() {
         when (val c = chips[chipIndex]) {
             KChip.Surprise -> viewModel.surprise()?.let { onOpen(it.type, it.id) }
-            KChip.Refresh -> viewModel.refresh()
-            is KChip.Country -> viewModel.setCountry(c.country)
+            KChip.Refresh -> { if (calendarOn) { calendarOn = false; rowIndex = homeRowIndex }; viewModel.refresh() }
+            KChip.Calendar -> toggleCalendar()
+            is KChip.Country -> { viewModel.setCountry(c.country); if (calendarOn) viewModel.loadCalendar() }
         }
     }
 
@@ -184,6 +213,28 @@ internal fun NetflixDoramasScreen(
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent true
                 if (showIntro) return@onPreviewKeyEvent ev.key != Key.Back
+                if (menuItem != null || menuRestore) {
+                    when (ev.key) {
+                        Key.DirectionUp -> menuOption = 0
+                        Key.DirectionDown -> menuOption = 1
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                            if (menuOption == 0) {
+                                menuItem?.let { viewModel.hide(it) }
+                                if (menuRestore) viewModel.restoreHidden()
+                            }
+                            menuItem = null; menuRestore = false
+                        }
+                        Key.Back, Key.Menu -> { menuItem = null; menuRestore = false }
+                        else -> {}
+                    }
+                    return@onPreviewKeyEvent true
+                }
+                if (ev.key == Key.Menu) {
+                    menuOption = 0
+                    if (inBar) { if (hidden.isNotEmpty()) menuRestore = true } else menuItem = item
+                    return@onPreviewKeyEvent true
+                }
+                if (ev.key == Key.Back && calendarOn) { toggleCalendar(); return@onPreviewKeyEvent true }
                 if (inBar) when (ev.key) {
                     Key.DirectionLeft -> { chipIndex = (chipIndex - 1).coerceAtLeast(0); true }
                     Key.DirectionRight -> { chipIndex = (chipIndex + 1).coerceAtMost(chips.size - 1); true }
@@ -237,7 +288,12 @@ internal fun NetflixDoramasScreen(
                 }
                 Spacer(Modifier.height(12.dp))
                 if (item == null) {
-                    Text(if (loading) "Separando os melhores doramas para você…" else "Nenhum dorama encontrado com esse filtro.",
+                    Text(when {
+                        calendarOn && loading -> "Montando o calendário da semana…"
+                        calendarOn -> "Nenhum episódio marcado para esta semana."
+                        loading -> "Separando os melhores doramas para você…"
+                        else -> "Nenhum dorama encontrado com esse filtro."
+                    },
                         color = PinkSoft.copy(alpha = 0.8f), fontSize = 15.sp)
                     return@Column
                 }
@@ -250,6 +306,10 @@ internal fun NetflixDoramasScreen(
                 Spacer(Modifier.height(10.dp))
                 val resumeInfo = progress[item.key]
                 if (row?.id == NetflixDoramasViewModel.CONT_ROW && resumeInfo != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (item.key in newEp) {
+                        AiringPill("Episódio novo disponível")
+                        Spacer(Modifier.width(8.dp))
+                    }
                     Text(listOfNotNull("Continuar", resumeInfo.label).joinToString(" "), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     if (resumeInfo.progress > 0) {
                         Spacer(Modifier.width(10.dp))
@@ -291,6 +351,7 @@ internal fun NetflixDoramasScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     KHint("Mais informações", Icons.Default.Info, primary = false)
                     KHint(if (row?.id == NetflixDoramasViewModel.CONT_ROW) "Continuar" else "Assistir", Icons.Default.PlayArrow, primary = true)
+                    KHint("Não tenho interesse", Icons.Default.Menu, primary = false)
                 }
             }
         }
@@ -303,7 +364,7 @@ internal fun NetflixDoramasScreen(
         ) {
             chips.forEachIndexed { i, c ->
                 val focused = inBar && i == chipIndex
-                val selected = c is KChip.Country && c.country.label == country.label
+                val selected = (c is KChip.Country && c.country.label == country.label) || (c is KChip.Calendar && calendarOn)
                 val bg = when {
                     focused -> DoramaPink
                     selected -> DoramaPink.copy(alpha = 0.25f)
@@ -316,7 +377,10 @@ internal fun NetflixDoramasScreen(
                         .padding(horizontal = 14.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val icon = when (c) { KChip.Surprise -> Icons.Default.Shuffle; KChip.Refresh -> Icons.Default.Refresh; else -> null }
+                    val icon = when (c) {
+                        KChip.Surprise -> Icons.Default.Shuffle; KChip.Refresh -> Icons.Default.Refresh
+                        KChip.Calendar -> Icons.Default.DateRange; else -> null
+                    }
                     if (icon != null) {
                         Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
@@ -353,11 +417,32 @@ internal fun NetflixDoramasScreen(
                             horizontalArrangement = Arrangement.spacedBy(if (r.ranked) 4.dp else 8.dp)) {
                             itemsIndexed(r.items, key = { _, it -> it.key }) { j, it ->
                                 val f = focusedRow && j == c
-                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress, airing[it.key], f, r.rating)
+                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress,
+                                    if (it.key in newEp) "NOVO EPISÓDIO" else airing[it.key], f, r.rating)
                             }
                         }
                         Box(Modifier.width(56.dp).height(if (r.ranked) 160.dp else 110.dp)
                             .background(Brush.horizontalGradient(0f to Plum, 0.75f to Plum, 1f to Color.Transparent)))
+                    }
+                }
+            }
+        }
+        if (menuItem != null || menuRestore) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
+                Column(Modifier.width(420.dp).background(PlumCard, RoundedCornerShape(12.dp))
+                    .border(1.dp, DoramaPink.copy(alpha = 0.5f), RoundedCornerShape(12.dp)).padding(20.dp)) {
+                    val target = menuItem
+                    Text(if (target != null) (titles[target.key] ?: target.title) else "Doramas escondidos",
+                        color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(if (target != null) "Some da aba Doramas e não volta nas recomendações." else "Você escondeu ${hidden.size} da aba.",
+                        color = PinkSoft.copy(alpha = 0.8f), fontSize = 13.sp)
+                    Spacer(Modifier.height(14.dp))
+                    listOf(if (target != null) "Não tenho interesse" else "Mostrar de novo", "Cancelar").forEachIndexed { i, label ->
+                        val f = i == menuOption
+                        Text(label, color = if (f) Color.White else Color.White.copy(alpha = 0.75f), fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                .background(if (f) DoramaPink else Color.Transparent, RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 8.dp))
                     }
                 }
             }

@@ -72,7 +72,7 @@ private val COUNTRY_LANGS = mapOf("KR" to listOf("ko"), "JP" to listOf("ja"), "C
  */
 @HiltViewModel
 internal class NetflixDoramasViewModel @Inject constructor(
-    @ApplicationContext context: Context,
+    @ApplicationContext private val context: Context,
     profileManager: ProfileManager,
     private val streamRepository: StreamRepository
 ) : ViewModel() {
@@ -99,6 +99,22 @@ internal class NetflixDoramasViewModel @Inject constructor(
     /** Trailer (YouTube) do item em destaque: chave do item -> id do vídeo. */
     private val _trailers = MutableStateFlow<Map<String, String>>(emptyMap())
     val trailers: StateFlow<Map<String, String>> = _trailers.asStateFlow()
+
+    /** Doramas começados que já têm episódio novo saído depois do ponto onde a pessoa parou. */
+    private val _newEp = MutableStateFlow<Set<String>>(emptySet())
+    val newEp: StateFlow<Set<String>> = _newEp.asStateFlow()
+    /** Calendário da semana: uma fileira por dia (hoje + 6), com os doramas que soltam episódio nele. */
+    private val _calendar = MutableStateFlow<List<DRow>>(emptyList())
+    val calendar: StateFlow<List<DRow>> = _calendar.asStateFlow()
+    private val _calLoading = MutableStateFlow(false)
+    val calLoading: StateFlow<Boolean> = _calLoading.asStateFlow()
+    private var calJob: Job? = null
+    private var calCountry: String? = null
+
+    // "Não tenho interesse": escondidos para sempre da aba (guardado no aparelho).
+    private val prefs = context.getSharedPreferences("sm_doramas", Context.MODE_PRIVATE)
+    private val _hidden = MutableStateFlow(prefs.getStringSet("hidden", emptySet()).orEmpty().toSet())
+    val hidden: StateFlow<Set<String>> = _hidden.asStateFlow()
 
     /** As mesmas configurações de trailer da Home (tocar sozinho, som, atraso). */
     val trailerSettings: StateFlow<ServiceHomeTrailerSettings> = observeHomeProfilePreferences(
@@ -137,12 +153,65 @@ internal class NetflixDoramasViewModel @Inject constructor(
     fun setCountry(c: DoramaCountry) {
         if (c.label == _country.value.label) return
         _country.value = c
+        calCountry = null
+        _calendar.value = emptyList()
         reload()
     }
 
     fun refresh() {
         round++
         reload()
+    }
+
+    /** "Não tenho interesse": some da aba agora e nas próximas vezes. */
+    fun hide(item: DItem) {
+        _hidden.value = _hidden.value + item.key
+        prefs.edit().putStringSet("hidden", _hidden.value).apply()
+        val drop: (List<DRow>) -> List<DRow> = { rows ->
+            rows.map { r -> r.copy(items = r.items.filter { it.key != item.key }) }.filter { it.items.isNotEmpty() }
+        }
+        _rows.value = drop(_rows.value)
+        _calendar.value = drop(_calendar.value)
+        saveCache(_rows.value)
+    }
+
+    /** Mostra de novo tudo o que foi escondido. */
+    fun restoreHidden() {
+        _hidden.value = emptySet()
+        prefs.edit().remove("hidden").apply()
+        prefs.edit().remove(cacheKey()).apply()
+        reload()
+    }
+
+    /** Monta o calendário da semana (uma vez por país). */
+    fun loadCalendar() {
+        val codes = _country.value.codes
+        if (calCountry == codes && (_calendar.value.isNotEmpty() || calJob?.isActive == true)) return
+        calCountry = codes
+        calJob?.cancel()
+        _calendar.value = emptyList()
+        _calLoading.value = true
+        calJob = viewModelScope.launch {
+            val today = LocalDate.now()
+            val days = (0..6).map { today.plusDays(it.toLong()) }
+            val hiddenNow = _hidden.value
+            val rows = days.toList().mapLimit(3) { day ->
+                val items = discover(mapOf("sort_by" to "popularity.desc", "air_date.gte" to day.toString(), "air_date.lte" to day.toString()))
+                    .filter { it.key !in hiddenNow }.take(20)
+                wantInfo(items.take(10))
+                val dayName = WEEKDAYS[day.dayOfWeek].orEmpty()
+                val date = day.format(DateTimeFormatter.ofPattern("dd/MM"))
+                val title = when (day) {
+                    today -> "Hoje • $dayName, $date"
+                    today.plusDays(1) -> "Amanhã • $dayName, $date"
+                    else -> "${dayName.replaceFirstChar { it.uppercase() }}, $date"
+                }
+                DRow("day${day}", title, items)
+            }.filter { it.items.isNotEmpty() }
+            _calendar.value = rows
+            fixTitles(rows.flatMap { it.items })
+            _calLoading.value = false
+        }
     }
 
     fun surprise(): DItem? {
@@ -244,7 +313,9 @@ internal class NetflixDoramasViewModel @Inject constructor(
 
     private fun reload() {
         job?.cancel()
-        _rows.value = emptyList()
+        // Abre na hora com as fileiras guardadas da última vez; as novas entram quando ficarem prontas.
+        val cached = if (round == 0) loadCache() else null
+        _rows.value = cached.orEmpty()
         _loading.value = true
         allPage = 0; allTotalPages = Int.MAX_VALUE; allLoading = false
         val rnd = Random(System.nanoTime())
@@ -258,11 +329,13 @@ internal class NetflixDoramasViewModel @Inject constructor(
             val specs = plan(rnd, cont, list, lib)
             val done = arrayOfNulls<List<DItem>>(specs.size)
             val lock = Mutex()
-            suspend fun publish() {
+            val hiddenNow = _hidden.value
+            suspend fun publish(final: Boolean) {
+                if (cached != null && !final) return
                 val seen = HashSet<String>()
                 val out = mutableListOf<DRow>()
                 for ((i, s) in specs.withIndex()) {
-                    val items = done[i] ?: break
+                    val items = (done[i] ?: if (final) emptyList() else break).filter { it.key !in hiddenNow }
                     val fresh = when {
                         s.ranked -> items.take(10)
                         s.noDedupe -> items
@@ -275,11 +348,13 @@ internal class NetflixDoramasViewModel @Inject constructor(
                 _rows.value = out
                 out.firstOrNull()?.let { wantInfo(it.items.take(2)) }
                 fixTitles(out.flatMap { it.items })
+                if (final) saveCache(out)
             }
             specs.withIndex().toList().mapLimit(4) { (i, s) ->
                 val items = runCatching { s.load() }.getOrElse { if (it is CancellationException) throw it; emptyList() }
-                lock.withLock { done[i] = items; publish() }
+                lock.withLock { done[i] = items; publish(final = false) }
             }
+            lock.withLock { publish(final = true) }
             _loading.value = false
         }
     }
@@ -423,14 +498,69 @@ internal class NetflixDoramasViewModel @Inject constructor(
     private suspend fun continueItems(): List<DItem> {
         val list = resume.filter { it.item.mediaType == MediaType.TV || it.item.mediaType == MediaType.MOVIE }
             .distinctBy { "${it.item.mediaType}_${it.item.id}" }
+        val fresh = HashSet<String>()
         val found = list.mapLimit(6) { r ->
             val item = libraryItem(r.item.mediaType, r.item.id) ?: return@mapLimit null
             val label = if (r.season != null && r.episode != null) "T${r.season}:E${r.episode}" else null
+            if (item.type == MediaType.TV && hasNewEpisode(r)) fresh += item.key
             item to DResume(r.progress, label)
         }.filterNotNull()
         _progress.value = found.associate { it.first.key to it.second }
-        return found.map { it.first }
+        _newEp.value = fresh
+        // Quem tem episódio novo vai para a frente.
+        return found.map { it.first }.sortedByDescending { it.key in fresh }
     }
+
+    /**
+     * Saiu episódio novo (nas últimas 3 semanas) depois do ponto onde a pessoa está: o último episódio no ar
+     * vem depois do que ela está vendo, ou é o próprio próximo episódio (ainda não começado).
+     */
+    private suspend fun hasNewEpisode(r: NetflixResume): Boolean {
+        val s = r.season ?: return false
+        val e = r.episode ?: return false
+        val last = tmdb("/tv/${r.item.id}")?.optJSONObject("last_episode_to_air") ?: return false
+        val date = runCatching { LocalDate.parse(last.optString("air_date")) }.getOrNull() ?: return false
+        if (date.isBefore(LocalDate.now().minusDays(21))) return false
+        val ls = last.optInt("season_number")
+        val le = last.optInt("episode_number")
+        return ls > s || (ls == s && le > e) || (ls == s && le == e && r.progress <= 1)
+    }
+
+    // ---------- Cache (abrir na hora) ----------
+
+    private fun cacheKey() = "rows_" + _country.value.codes
+
+    private fun saveCache(rows: List<DRow>) {
+        runCatching {
+            val arr = JSONArray()
+            rows.filter { it.id != CONT_ROW }.forEach { r ->
+                arr.put(JSONObject().put("id", r.id).put("title", r.title).put("ranked", r.ranked).put("rating", r.rating)
+                    .put("items", JSONArray().apply {
+                        r.items.take(40).forEach { i ->
+                            put(JSONObject().put("type", i.type.name).put("id", i.id).put("title", i.title).put("backdrop", i.backdrop)
+                                .put("poster", i.poster ?: "").put("overview", i.overview).put("year", i.year).put("vote", i.vote)
+                                .put("votes", i.votes).put("genres", JSONArray(i.genres)))
+                        }
+                    }))
+            }
+            prefs.edit().putString(cacheKey(), arr.toString()).apply()
+        }
+    }
+
+    private fun loadCache(): List<DRow>? = runCatching {
+        val raw = prefs.getString(cacheKey(), null) ?: return null
+        val hiddenNow = _hidden.value
+        JSONArray(raw).objects().map { r ->
+            DRow(r.optString("id"), r.optString("title"), r.optJSONArray("items").objects().map { i ->
+                DItem(
+                    type = MediaType.valueOf(i.optString("type")), id = i.optInt("id"), title = i.optString("title"),
+                    backdrop = i.optString("backdrop"), poster = i.optString("poster").ifBlank { null }, overview = i.optString("overview"),
+                    year = i.optString("year"), vote = i.optDouble("vote", 0.0), votes = i.optInt("votes"),
+                    genres = i.optJSONArray("genres").strings()
+                )
+            }.filter { it.key !in hiddenNow }, r.optBoolean("ranked"), r.optBoolean("rating"))
+        }.filter { it.items.isNotEmpty() }.takeIf { it.isNotEmpty() }
+    }.getOrNull()
 
     /** Doramas e filmes asiáticos da Minha lista. */
     private suspend fun myListItems(): List<DItem> =

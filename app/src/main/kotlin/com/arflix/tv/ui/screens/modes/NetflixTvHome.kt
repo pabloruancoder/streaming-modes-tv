@@ -120,6 +120,7 @@ internal fun NetflixTvHome(
     onBack: () -> Unit,
     onNewPopular: () -> Unit = {},
     onDiscover: () -> Unit = {},
+    onDoramas: () -> Unit = {},
     viewModel: ServiceHomeViewModel = hiltViewModel(),
     extras: NetflixExtrasViewModel = hiltViewModel()
 ) {
@@ -168,6 +169,7 @@ internal fun NetflixTvHome(
             NavEntry("Filmes", Icons.Default.Movie, {}, ServiceHome.Filter.MOVIES),
             NavEntry("Novidades e populares", Icons.Default.Add, onNewPopular),
             NavEntry("Descobrir", Icons.Default.Add, onDiscover),
+            NavEntry("Doramas", Icons.Default.Add, onDoramas),
             NavEntry("Minha Netflix", Icons.Default.Add, onMyList),
             NavEntry("Trocar modo", Icons.Default.SwapHoriz, onPickMode),
             NavEntry("Configurações", Icons.Default.Settings, onSettings)
@@ -698,6 +700,9 @@ private fun NetflixTopBar(entries: List<NavEntry>, focusedIndex: Int, selectedIn
                             Icon(e.icon, contentDescription = e.label, tint = Color.White, modifier = Modifier.size(18.dp))
                         }
                         iconOnly -> Icon(e.icon, contentDescription = e.label, tint = fg, modifier = Modifier.size(20.dp))
+                        // Doramas: aba especial, o nome fica rosa na barra.
+                        e.label == "Doramas" -> Text(e.label, color = if (focused) DoramaPink else DoramaPink.copy(alpha = 0.9f),
+                            fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         else -> Text(e.label, color = fg, fontSize = 15.sp, fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium)
                     }
                 }

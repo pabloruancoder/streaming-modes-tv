@@ -8294,6 +8294,21 @@ class PlayerViewModel @Inject constructor(
                 (playbackState == Player.STATE_ENDED || progressPercent >= Constants.WATCHED_THRESHOLD)
             ) {
                 hasMarkedWatched = true
+                // Streaming Modes TV: sem Trakt/Simkl conectado, o scrobble abaixo não faz nada e o episódio
+                // nunca virava "assistido". Marca na lista local do perfil (a mesma do "marcar como assistido").
+                try {
+                    if (remoteSyncManager.active() == null) {
+                        val s = currentSeason
+                        val e = currentEpisode
+                        if (currentMediaType == MediaType.TV && s != null && e != null) {
+                            traktRepository.markEpisodeWatched(currentMediaId, s, e, isAnime = isCurrentAnime())
+                        } else if (currentMediaType == MediaType.MOVIE) {
+                            traktRepository.markMovieWatched(currentMediaId)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
                 try {
                     if (!closing) remoteSyncManager.scrobbleStop(
                         mediaType = currentMediaType,

@@ -51,8 +51,46 @@ class WatchHistoryRepository @Inject constructor(
     private val authRepositoryProvider: Provider<AuthRepository>,
     private val supabaseApi: SupabaseApi,
     private val profileManager: ProfileManager,
-    private val realtimeSyncManagerProvider: Provider<RealtimeSyncManager>
+    private val realtimeSyncManagerProvider: Provider<RealtimeSyncManager>,
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context
 ) {
+    // Streaming Modes TV: sem conta na nuvem do ARVIO, o histórico (progresso de cada episódio/filme)
+    // fica salvo no próprio aparelho, por perfil. Antes ele era descartado e a lista de episódios
+    // ficava sem as barras de progresso.
+    private val localPrefs by lazy { context.getSharedPreferences("sm_watch_history", android.content.Context.MODE_PRIVATE) }
+    private val localJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    private val localLoadedProfiles = ConcurrentHashMap.newKeySet<String>()
+
+    /** Sem login (ou no modo Netlify): o histórico vive no cache local. */
+    private fun localMode(): Boolean =
+        Constants.USE_NETLIFY_CLOUD_SYNC || authRepositoryProvider.get().getCurrentUserId() == null
+
+    private fun ensureLocalLoaded(profileId: String) {
+        if (Constants.USE_NETLIFY_CLOUD_SYNC || !localLoadedProfiles.add(profileId)) return
+        val stored = runCatching {
+            localPrefs.getString("h_$profileId", null)?.let {
+                localJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(WatchHistoryEntry.serializer()), it)
+            }
+        }.getOrNull().orEmpty()
+        if (stored.isEmpty()) return
+        val merged = (cachedWatchHistoryByProfile[profileId].orEmpty() + stored)
+            .distinctBy { "${it.media_type}_${it.show_tmdb_id}_${it.season}_${it.episode}" }
+        cachedWatchHistoryByProfile[profileId] = merged
+        cachedContinueWatchingByProfile[profileId] = merged
+            .filter { isEntryInProgress(it) }
+            .distinctBy { "${it.media_type}_${it.show_tmdb_id}" }
+    }
+
+    private fun persistLocal(profileId: String) {
+        if (Constants.USE_NETLIFY_CLOUD_SYNC) return
+        val list = cachedWatchHistoryByProfile[profileId].orEmpty().take(1000)
+        runCatching {
+            localPrefs.edit().putString(
+                "h_$profileId",
+                localJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(WatchHistoryEntry.serializer()), list)
+            ).apply()
+        }
+    }
     // In-memory cache of the last successful CW fetch. When the Supabase REST call
     // fails (network timeout, 401, etc.), we return this cached list instead of an
     // empty list — so Continue Watching never silently disappears from the UI.
@@ -130,9 +168,10 @@ class WatchHistoryRepository @Inject constructor(
         streamTitle: String? = null,
         sessionStartTime: Long = 0L
     ) {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
+        val local = localMode()
+        val userId = authRepositoryProvider.get().getCurrentUserId() ?: "local"
 
-        if (sessionStartTime > 0L) {
+        if (!local && sessionStartTime > 0L) {
             val existingProgress = getProgress(mediaType, tmdbId, season, episode)
             if (existingProgress != null) {
                 val cloudUpdatedAt = parseEpoch(existingProgress.updated_at)
@@ -167,14 +206,15 @@ class WatchHistoryRepository @Inject constructor(
                 stream_title = streamTitle
             )
 
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (local) {
             val profileId = currentProfileId()
+            ensureLocalLoaded(profileId)
             val nowIso = Instant.now().toString()
             val cachedEntry = entry.copy(
                 paused_at = nowIso,
                 updated_at = nowIso
             )
-            cachedWatchHistory = listOf(cachedEntry) + cachedWatchHistory.filterNot { existing ->
+            cachedWatchHistory = listOf(cachedEntry) + cachedWatchHistoryByProfile[profileId].orEmpty().filterNot { existing ->
                 existing.media_type == cachedEntry.media_type &&
                     existing.show_tmdb_id == cachedEntry.show_tmdb_id &&
                     existing.season == cachedEntry.season &&
@@ -193,6 +233,7 @@ class WatchHistoryRepository @Inject constructor(
                 }
             }
             cachedContinueWatchingByProfile[profileId] = cachedContinueWatching
+            persistLocal(profileId)
             try {
                 realtimeSyncManagerProvider.get().markLocalWatchHistoryWrite()
             } catch (e: Exception) {
@@ -267,7 +308,8 @@ class WatchHistoryRepository @Inject constructor(
      */
     suspend fun getWatchHistory(): List<WatchHistoryEntry> {
         val profileId = currentProfileId()
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (localMode()) {
+            ensureLocalLoaded(profileId)
             return cachedWatchHistoryByProfile[profileId].orEmpty()
         }
         val userId = authRepositoryProvider.get().getCurrentUserId()
@@ -316,7 +358,8 @@ class WatchHistoryRepository @Inject constructor(
                 title = entry.title
             )
         }
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (localMode()) {
+            ensureLocalLoaded(profileId)
             return filterLive(cachedContinueWatchingByProfile[profileId].orEmpty())
         }
         val userId = authRepositoryProvider.get().getCurrentUserId()
@@ -356,7 +399,8 @@ class WatchHistoryRepository @Inject constructor(
         season: Int?,
         episode: Int?
     ): WatchHistoryEntry? {
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (localMode()) {
+            ensureLocalLoaded(currentProfileId())
             return cachedWatchHistoryByProfile[currentProfileId()].orEmpty().firstOrNull { entry ->
                 entry.show_tmdb_id == tmdbId &&
                     entry.media_type == (if (mediaType == MediaType.MOVIE) "movie" else "tv") &&
@@ -394,7 +438,8 @@ class WatchHistoryRepository @Inject constructor(
         mediaType: MediaType,
         tmdbId: Int
     ): WatchHistoryEntry? {
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (localMode()) {
+            ensureLocalLoaded(currentProfileId())
             val mediaTypeKey = if (mediaType == MediaType.MOVIE) "movie" else "tv"
             return cachedWatchHistoryByProfile[currentProfileId()].orEmpty()
                 .filter { it.show_tmdb_id == tmdbId && it.media_type == mediaTypeKey }
@@ -440,6 +485,8 @@ class WatchHistoryRepository @Inject constructor(
         episode: Int?
     ) {
         val profileId = currentProfileId()
+        val local = localMode()
+        if (local) ensureLocalLoaded(profileId)
         fun keepEntry(entry: WatchHistoryEntry): Boolean = !(
             entry.show_tmdb_id == tmdbId &&
                 (season == null || entry.season == season) &&
@@ -452,7 +499,8 @@ class WatchHistoryRepository @Inject constructor(
         cachedContinueWatchingByProfile[profileId] =
             cachedContinueWatchingByProfile[profileId].orEmpty().filter(::keepEntry)
 
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (local) {
+            persistLocal(profileId)
             return
         }
         val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
@@ -479,12 +527,14 @@ class WatchHistoryRepository @Inject constructor(
      * Clear all watch history
      */
     suspend fun clearHistory() {
-        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+        if (localMode()) {
             val profileId = currentProfileId()
+            localLoadedProfiles.add(profileId)
             cachedWatchHistoryByProfile.remove(profileId)
             cachedContinueWatchingByProfile.remove(profileId)
             cachedWatchHistory = emptyList()
             cachedContinueWatching = emptyList()
+            persistLocal(profileId)
             return
         }
         val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
@@ -509,6 +559,7 @@ class WatchHistoryRepository @Inject constructor(
         cachedWatchHistory = emptyList()
         cachedContinueWatchingByProfile.clear()
         cachedWatchHistoryByProfile.clear()
+        localLoadedProfiles.clear() // o salvo no aparelho volta a ser lido na próxima consulta
     }
 
     private suspend fun <T> executeSupabaseCall(

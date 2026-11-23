@@ -447,9 +447,11 @@ private fun EpisodeRow(e: Episode, focused: Boolean, progress: Int?) {
         Box(Modifier.size(width = 160.dp, height = 90.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFF222222))) {
             val still = e.stillPath?.let { if (it.startsWith("/")) "https://image.tmdb.org/t/p/w300$it" else it }
             if (still != null) AsyncImage(model = still, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            if (progress != null && progress > 0) {
+            // Como na Netflix: episódio assistido = barra vermelha cheia; em andamento = barra até onde parou.
+            val shown = if (e.isWatched) 100 else progress
+            if (shown != null && shown > 0) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.3f))) {
-                    Box(Modifier.fillMaxWidth(progress / 100f).height(3.dp).background(NRed))
+                    Box(Modifier.fillMaxWidth(shown.coerceAtMost(100) / 100f).height(3.dp).background(NRed))
                 }
             }
         }

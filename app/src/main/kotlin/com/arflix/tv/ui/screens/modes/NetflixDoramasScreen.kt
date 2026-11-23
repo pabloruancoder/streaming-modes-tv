@@ -53,6 +53,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
@@ -108,16 +109,18 @@ internal fun NetflixDoramasScreen(
     val rows by viewModel.rows.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val country by viewModel.country.collectAsStateWithLifecycle()
-    val logos by viewModel.logos.collectAsStateWithLifecycle()
+    val info by viewModel.info.collectAsStateWithLifecycle()
+    val progress by viewModel.progress.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         extras.refresh()
-        val resume = withTimeoutOrNull(3_000) { extras.resume.first { it.isNotEmpty() } }.orEmpty().map { it.item }
+        val resumeList = withTimeoutOrNull(3_000) { extras.resume.first { it.isNotEmpty() } }.orEmpty()
+        val resume = resumeList.map { it.item }
         val seeds = (resume + extras.myList.value)
             .filter { it.mediaType == MediaType.TV }
             .distinctBy { it.id }
             .map { NSSeed(it.mediaType, it.id, it.title) }
-        viewModel.start(seeds)
+        viewModel.start(seeds, resumeList)
     }
 
     val chips = remember { listOf(KChip.Surprise, KChip.Refresh) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
@@ -135,7 +138,7 @@ internal fun NetflixDoramasScreen(
         if (rows.isEmpty()) { rowIndex = 0; cols.clear() }
     }
     LaunchedEffect(item?.key) {
-        row?.let { viewModel.wantLogos(it.items.drop(col).take(8)) }
+        row?.let { viewModel.wantInfo(it.items.drop(col).take(3)) }
         // "Todos os doramas": perto do fim, busca a próxima página.
         if (row?.id == NetflixDoramasViewModel.ALL_ROW && col >= row.items.size - 8) viewModel.loadMoreAll()
     }
@@ -207,13 +210,18 @@ internal fun NetflixDoramasScreen(
                         color = PinkSoft.copy(alpha = 0.8f), fontSize = 15.sp)
                     return@Column
                 }
-                val logo = logos[item.key]
-                if (!logo.isNullOrBlank()) {
-                    AsyncImage(model = logo, contentDescription = item.title, contentScale = ContentScale.Fit, alignment = Alignment.CenterStart,
-                        modifier = Modifier.heightIn(max = 68.dp).widthIn(max = 300.dp))
-                } else Text(item.title, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black, maxLines = 2, lineHeight = 30.sp)
+                // Sempre o nome em português (o mesmo das outras telas), sem imagem de logo com outra tradução.
+                Text(item.title, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black, maxLines = 2, lineHeight = 32.sp,
+                    overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(PinkDeep, blurRadius = 18f)))
                 Spacer(Modifier.height(10.dp))
-                if (row?.ranked == true) Row(verticalAlignment = Alignment.CenterVertically) {
+                val resumeInfo = progress[item.key]
+                if (row?.id == NetflixDoramasViewModel.CONT_ROW && resumeInfo != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(listOfNotNull("Continuar", resumeInfo.label).joinToString(" "), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    if (resumeInfo.progress > 0) {
+                        Spacer(Modifier.width(10.dp))
+                        PinkProgress(resumeInfo.progress, Modifier.width(140.dp))
+                    }
+                } else if (row?.ranked == true) Row(verticalAlignment = Alignment.CenterVertically) {
                     PinkTop10Badge()
                     Spacer(Modifier.width(8.dp))
                     Text("Nº ${col + 1} entre os doramas desta semana", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -226,7 +234,7 @@ internal fun NetflixDoramasScreen(
                         Text(kRating(item.vote), color = DoramaPink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(10.dp))
                     }
-                    val meta = listOfNotNull("Dorama", item.year.ifBlank { null }) + item.genres.take(3)
+                    val meta = listOfNotNull("Dorama", item.year.ifBlank { null }, info[item.key]) + item.genres.take(2)
                     Text(meta.joinToString("  •  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
                 }
                 if (item.overview.isNotBlank()) {
@@ -236,7 +244,7 @@ internal fun NetflixDoramasScreen(
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     KHint("Mais informações", Icons.Default.Info, primary = false)
-                    KHint("Assistir", Icons.Default.PlayArrow, primary = true)
+                    KHint(if (row?.id == NetflixDoramasViewModel.CONT_ROW) "Continuar" else "Assistir", Icons.Default.PlayArrow, primary = true)
                 }
             }
         }
@@ -299,7 +307,7 @@ internal fun NetflixDoramasScreen(
                             horizontalArrangement = Arrangement.spacedBy(if (r.ranked) 4.dp else 8.dp)) {
                             itemsIndexed(r.items, key = { _, it -> it.key }) { j, it ->
                                 val f = focusedRow && j == c
-                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, logos[it.key], f, r.rating)
+                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, progress[it.key]?.progress, f, r.rating)
                             }
                         }
                         Box(Modifier.width(56.dp).height(if (r.ranked) 160.dp else 110.dp)
@@ -308,6 +316,14 @@ internal fun NetflixDoramasScreen(
                 }
             }
         }
+    }
+}
+
+/** Barra de progresso rosa (quanto já foi assistido). */
+@Composable
+private fun PinkProgress(percent: Int, modifier: Modifier) {
+    Box(modifier.height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.3f))) {
+        Box(Modifier.fillMaxHeight().fillMaxWidth(percent.coerceIn(2, 100) / 100f).background(DoramaPink))
     }
 }
 
@@ -332,7 +348,7 @@ private fun KHint(text: String, icon: ImageVector, primary: Boolean) {
 }
 
 @Composable
-private fun KCard(item: DItem, logo: String?, focused: Boolean, showRating: Boolean) {
+private fun KCard(item: DItem, progress: Int?, focused: Boolean, showRating: Boolean) {
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(160), label = "kc")
     Box(
         Modifier.zIndex(if (focused) 1f else 0f).scale(scale).size(width = 176.dp, height = 99.dp).clip(RoundedCornerShape(6.dp))
@@ -341,11 +357,10 @@ private fun KCard(item: DItem, logo: String?, focused: Boolean, showRating: Bool
     ) {
         AsyncImage(model = item.backdrop, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Plum.copy(alpha = 0.85f))))
-        if (!logo.isNullOrBlank()) {
-            AsyncImage(model = logo, contentDescription = null, contentScale = ContentScale.Fit,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 6.dp).height(28.dp).fillMaxWidth())
-        } else Text(item.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = 6.dp))
+        val hasBar = progress != null && progress > 0
+        Text(item.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = if (hasBar) 12.dp else 6.dp))
+        if (hasBar) PinkProgress(progress!!, Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 5.dp))
         if (showRating && item.vote > 0) {
             Row(Modifier.align(Alignment.TopEnd).padding(5.dp).background(Plum.copy(alpha = 0.8f), RoundedCornerShape(3.dp))
                 .padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {

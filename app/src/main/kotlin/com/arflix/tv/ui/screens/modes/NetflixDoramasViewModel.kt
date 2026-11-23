@@ -33,6 +33,9 @@ import kotlin.random.Random
 /** Filtro por país da aba Doramas. */
 internal data class DoramaCountry(val label: String, val codes: String)
 
+/** Progresso de um dorama que a pessoa começou (fileira "Continue assistindo"). */
+internal data class DResume(val progress: Int, val label: String?)
+
 internal val DORAMA_COUNTRIES = listOf(
     DoramaCountry("Todos", "KR|JP|CN|TW|TH"),
     DoramaCountry("Coreia", "KR"),
@@ -56,25 +59,30 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
     private val _country = MutableStateFlow(DORAMA_COUNTRIES.first())
     val country: StateFlow<DoramaCountry> = _country.asStateFlow()
-    private val _logos = MutableStateFlow<Map<String, String>>(emptyMap())
-    val logos: StateFlow<Map<String, String>> = _logos.asStateFlow()
+    /** "16 episódios • 1 temporada", por item (carregado quando a capa ganha foco). */
+    private val _info = MutableStateFlow<Map<String, String>>(emptyMap())
+    val info: StateFlow<Map<String, String>> = _info.asStateFlow()
+    private val _progress = MutableStateFlow<Map<String, DResume>>(emptyMap())
+    val progress: StateFlow<Map<String, DResume>> = _progress.asStateFlow()
 
     private var seeds: List<NSSeed> = emptyList()
+    private var resume: List<NetflixResume> = emptyList()
     private var job: Job? = null
     private var started = false
     private var round = 0
-    private val logoAsked = ConcurrentHashMap.newKeySet<String>()
-    private val logoGate = Semaphore(4)
+    private val infoAsked = ConcurrentHashMap.newKeySet<String>()
+    private val infoGate = Semaphore(4)
 
     // "Todos os doramas": paginação sem fim.
     private var allPage = 0
     private var allTotalPages = Int.MAX_VALUE
     private var allLoading = false
 
-    fun start(seeds: List<NSSeed>) {
+    fun start(seeds: List<NSSeed>, resume: List<NetflixResume>) {
         if (started) return
         started = true
         this.seeds = seeds
+        this.resume = resume
         reload()
     }
 
@@ -94,19 +102,23 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         return all.filter { it.vote >= 7.8 && it.votes >= 100 }.ifEmpty { all }.randomOrNull()
     }
 
-    fun wantLogos(items: List<DItem>) {
-        items.filter { logoAsked.add(it.key) }.forEach { item ->
+    /** Busca nº de episódios/temporadas dos itens (cache por item). */
+    fun wantInfo(items: List<DItem>) {
+        items.filter { it.key !in _info.value && infoAsked.add(it.key) }.forEach { item ->
             viewModelScope.launch {
-                logoGate.withPermit {
-                    val logos = tmdb("/tv/${item.id}/images", mapOf("include_image_language" to "pt,en,null"), lang = false)
-                        ?.optJSONArray("logos").objects()
-                    val best = logos.firstOrNull { it.optString("iso_639_1") == "pt" } ?: logos.firstOrNull { it.optString("iso_639_1") == "en" }
-                    best?.optString("file_path")?.takeIf { it.startsWith("/") }?.let { path ->
-                        _logos.value = _logos.value + (item.key to "$IMG/w300$path")
-                    }
-                }
+                infoGate.withPermit { tmdb("/tv/${item.id}")?.let { rememberInfo(item.key, it) } }
             }
         }
+    }
+
+    private fun rememberInfo(key: String, d: JSONObject) {
+        val eps = d.optInt("number_of_episodes")
+        val seasons = d.optInt("number_of_seasons")
+        val parts = buildList {
+            if (eps > 0) add(if (eps == 1) "1 episódio" else "$eps episódios")
+            if (seasons > 0) add(if (seasons == 1) "1 temporada" else "$seasons temporadas")
+        }
+        if (parts.isNotEmpty()) _info.value = _info.value + (key to parts.joinToString(" • "))
     }
 
     /** Chamado quando a pessoa chega perto do fim da fileira "Todos os doramas". */
@@ -131,7 +143,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     // ---------- Fileiras ----------
 
     private class Spec(val id: String, val title: String, val ranked: Boolean = false, val rating: Boolean = false,
-                       val noDedupe: Boolean = false, val limit: Int = 20, val load: suspend () -> List<DItem>)
+                       val noDedupe: Boolean = false, val limit: Int = 20, val minItems: Int = 4, val load: suspend () -> List<DItem>)
 
     private fun reload() {
         job?.cancel()
@@ -154,10 +166,10 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
                         else -> items.filter { it.key !in seen }.take(s.limit)
                     }
                     if (!s.noDedupe) fresh.forEach { seen += it.key }
-                    if (fresh.size >= 4) out += DRow(s.id, s.title, fresh, s.ranked, s.rating)
+                    if (fresh.size >= s.minItems) out += DRow(s.id, s.title, fresh, s.ranked, s.rating)
                 }
                 _rows.value = out
-                out.take(3).forEach { r -> wantLogos(r.items.take(8)) }
+                out.firstOrNull()?.let { wantInfo(it.items.take(2)) }
             }
             specs.withIndex().toList().mapLimit(4) { (i, s) ->
                 val items = runCatching { s.load() }.getOrElse { if (it is CancellationException) throw it; emptyList() }
@@ -171,6 +183,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         val today = LocalDate.now()
         fun pg(max: Int) = if (round == 0) 1 else rnd.nextInt(1, max + 1)
         val top = listOf(
+            Spec(CONT_ROW, "Continue assistindo seus doramas", noDedupe = true, minItems = 1) { continueItems() },
             Spec("top10", "Top 10 doramas da semana", ranked = true) { trending() },
             Spec("hot", "Doramas em alta agora") {
                 discover(mapOf("sort_by" to "popularity.desc"), dateFrom = today.minusYears(2), page = pg(2))
@@ -199,6 +212,24 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
             },
             Spec("comedy", "Comédias românticas e leves") {
                 discover(mapOf("sort_by" to "popularity.desc", "with_genres" to "35", "vote_count.gte" to 20), page = pg(3))
+            },
+            Spec("romance", "Romances de suspirar") {
+                byKeywords(listOf("romance", "love", "first love"), pg(3))
+            },
+            Spec("school", "Escolar e juventude") {
+                byKeywords(listOf("high school", "school", "coming of age", "youth"), pg(2))
+            },
+            Spec("sageuk", "Históricos e de época (Sageuk)") {
+                byKeywords(listOf("historical drama", "joseon dynasty", "historical", "period drama", "ancient china"), pg(2))
+            },
+            Spec("revenge", "Vingança") {
+                byKeywords(listOf("revenge"), pg(2))
+            },
+            Spec("office", "CEO e romance no escritório") {
+                byKeywords(listOf("office romance", "workplace romance", "ceo", "chaebol", "boss"), pg(2))
+            },
+            Spec("short", "Curtinhos para maratonar") {
+                discover(mapOf("sort_by" to "popularity.desc", "with_type" to 2, "vote_count.gte" to 10), page = pg(2))
             },
             Spec("fantasy", "Fantasia e sobrenatural") {
                 discover(mapOf("sort_by" to "popularity.desc", "with_genres" to "10765", "vote_count.gte" to 20), page = pg(3))
@@ -231,6 +262,42 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     }
 
     // ---------- Consultas ----------
+
+    /** Doramas que a pessoa começou (do histórico), só do país escolhido, com o progresso de cada um. */
+    private suspend fun continueItems(): List<DItem> {
+        val codes = _country.value.codes.split('|')
+        val tv = resume.filter { it.item.mediaType == MediaType.TV }.distinctBy { it.item.id }
+        val found = tv.mapLimit(6) { r ->
+            val d = tmdb("/tv/${r.item.id}") ?: return@mapLimit null
+            val countries = d.optJSONArray("origin_country").strings()
+            if (countries.none { it in codes }) return@mapLimit null
+            val genreIds = d.optJSONArray("genres").objects().map { it.optInt("id") }
+            if (genreIds.any { it in EXCLUDED_IDS }) return@mapLimit null
+            d.put("genre_ids", JSONArray(genreIds))
+            val item = toItem(d) ?: return@mapLimit null
+            rememberInfo(item.key, d)
+            val label = if (r.season != null && r.episode != null) "T${r.season}:E${r.episode}" else null
+            item to DResume(r.progress, label)
+        }.filterNotNull()
+        _progress.value = found.associate { it.first.key to it.second }
+        return found.map { it.first }
+    }
+
+    /** Fileira temática por palavras-chave do TMDB (os ids são procurados pelo nome uma vez e guardados). */
+    private suspend fun byKeywords(names: List<String>, page: Int): List<DItem> {
+        val ids = names.mapLimit(3) { keywordId(it) }.filterNotNull().distinct()
+        if (ids.isEmpty()) return emptyList()
+        return discover(mapOf("sort_by" to "popularity.desc", "with_keywords" to ids.joinToString("|"), "vote_count.gte" to 5), page = page)
+    }
+
+    private suspend fun keywordId(name: String): Int? {
+        keywordIds[name]?.let { return it.takeIf { id -> id > 0 } }
+        val json = tmdb("/search/keyword", mapOf("query" to name), lang = false) ?: return null
+        val res = json.optJSONArray("results").objects()
+        val id = (res.firstOrNull { it.optString("name").equals(name, ignoreCase = true) } ?: res.firstOrNull())?.optInt("id") ?: 0
+        keywordIds[name] = id
+        return id.takeIf { it > 0 }
+    }
 
     private suspend fun allPageItems(page: Int): List<DItem> {
         val json = tmdb("/discover/tv", baseParams() + mapOf("sort_by" to "popularity.desc", "page" to page))
@@ -328,6 +395,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     }
 
     private fun JSONArray?.objects(): List<JSONObject> = if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
+    private fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else (0 until length()).map { optString(it) }
     private fun JSONArray?.ints(): List<Int> = if (this == null) emptyList() else (0 until length()).map { optInt(it) }
 
     private suspend fun <T, R> List<T>.mapLimit(n: Int, f: suspend (T) -> R): List<R> = coroutineScope {
@@ -337,6 +405,8 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
 
     companion object {
         const val ALL_ROW = "all"
+        const val CONT_ROW = "continue"
+        private val keywordIds = ConcurrentHashMap<String, Int>()
         private const val NETFLIX_PROVIDER = 8
         private const val IMG = "https://image.tmdb.org/t/p"
         // Sem animação/anime, infantil, notícias, reality e talk show: só doramas de verdade.

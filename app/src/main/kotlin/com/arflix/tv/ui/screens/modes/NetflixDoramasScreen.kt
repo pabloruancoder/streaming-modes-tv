@@ -111,6 +111,7 @@ internal fun NetflixDoramasScreen(
     val country by viewModel.country.collectAsStateWithLifecycle()
     val info by viewModel.info.collectAsStateWithLifecycle()
     val progress by viewModel.progress.collectAsStateWithLifecycle()
+    val titles by viewModel.titles.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         extras.refresh()
@@ -211,7 +212,10 @@ internal fun NetflixDoramasScreen(
                     return@Column
                 }
                 // Sempre o nome em português (o mesmo das outras telas), sem imagem de logo com outra tradução.
-                Text(item.title, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black, maxLines = 2, lineHeight = 32.sp,
+                val name = titles[item.key] ?: item.title
+                val longName = name.length > 22
+                Text(name, color = Color.White, fontSize = if (longName) 24.sp else 30.sp, fontWeight = FontWeight.Black, maxLines = 2,
+                    lineHeight = if (longName) 26.sp else 32.sp,
                     overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(PinkDeep, blurRadius = 18f)))
                 Spacer(Modifier.height(10.dp))
                 val resumeInfo = progress[item.key]
@@ -235,11 +239,11 @@ internal fun NetflixDoramasScreen(
                         Spacer(Modifier.width(10.dp))
                     }
                     val meta = listOfNotNull("Dorama", item.year.ifBlank { null }, info[item.key]) + item.genres.take(2)
-                    Text(meta.joinToString("  •  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                    Text(meta.joinToString("  •  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (item.overview.isNotBlank()) {
                     Spacer(Modifier.height(8.dp))
-                    Text(item.overview, color = Color.White.copy(alpha = 0.88f), fontSize = 13.sp, lineHeight = 18.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Text(item.overview, color = Color.White.copy(alpha = 0.88f), fontSize = 13.sp, lineHeight = 18.sp, maxLines = if (longName || resumeInfo != null) 2 else 3, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -307,7 +311,7 @@ internal fun NetflixDoramasScreen(
                             horizontalArrangement = Arrangement.spacedBy(if (r.ranked) 4.dp else 8.dp)) {
                             itemsIndexed(r.items, key = { _, it -> it.key }) { j, it ->
                                 val f = focusedRow && j == c
-                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, progress[it.key]?.progress, f, r.rating)
+                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress, f, r.rating)
                             }
                         }
                         Box(Modifier.width(56.dp).height(if (r.ranked) 160.dp else 110.dp)
@@ -348,7 +352,7 @@ private fun KHint(text: String, icon: ImageVector, primary: Boolean) {
 }
 
 @Composable
-private fun KCard(item: DItem, progress: Int?, focused: Boolean, showRating: Boolean) {
+private fun KCard(item: DItem, name: String, progress: Int?, focused: Boolean, showRating: Boolean) {
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(160), label = "kc")
     Box(
         Modifier.zIndex(if (focused) 1f else 0f).scale(scale).size(width = 176.dp, height = 99.dp).clip(RoundedCornerShape(6.dp))
@@ -358,7 +362,7 @@ private fun KCard(item: DItem, progress: Int?, focused: Boolean, showRating: Boo
         AsyncImage(model = item.backdrop, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Plum.copy(alpha = 0.85f))))
         val hasBar = progress != null && progress > 0
-        Text(item.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        Text(name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = if (hasBar) 12.dp else 6.dp))
         if (hasBar) PinkProgress(progress!!, Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 5.dp))
         if (showRating && item.vote > 0) {

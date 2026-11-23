@@ -63,6 +63,10 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     private val _info = MutableStateFlow<Map<String, String>>(emptyMap())
     val info: StateFlow<Map<String, String>> = _info.asStateFlow()
     private val _progress = MutableStateFlow<Map<String, DResume>>(emptyMap())
+    /** Nome em inglês para doramas sem tradução em português (senão apareceria em tailandês, chinês...). */
+    private val _titles = MutableStateFlow<Map<String, String>>(emptyMap())
+    val titles: StateFlow<Map<String, String>> = _titles.asStateFlow()
+    private val titleAsked = ConcurrentHashMap.newKeySet<String>()
     val progress: StateFlow<Map<String, DResume>> = _progress.asStateFlow()
 
     private var seeds: List<NSSeed> = emptyList()
@@ -111,6 +115,18 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         }
     }
 
+    /** Troca títulos sem letras latinas pelo nome em inglês do TMDB. */
+    fun fixTitles(items: List<DItem>) {
+        items.filter { it.title.none { ch -> ch in 'A'..'Z' || ch in 'a'..'z' } && titleAsked.add(it.key) }.forEach { item ->
+            viewModelScope.launch {
+                infoGate.withPermit {
+                    val en = tmdb("/tv/${item.id}", mapOf("language" to "en-US"), lang = false)?.optString("name").orEmpty()
+                    if (en.any { it in 'A'..'Z' || it in 'a'..'z' }) _titles.value = _titles.value + (item.key to en)
+                }
+            }
+        }
+    }
+
     private fun rememberInfo(key: String, d: JSONObject) {
         val eps = d.optInt("number_of_episodes")
         val seasons = d.optInt("number_of_seasons")
@@ -134,6 +150,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
                 _rows.value = _rows.value.map { r ->
                     if (r.id == ALL_ROW) r.copy(items = (r.items + more).distinctBy { it.key }) else r
                 }
+                fixTitles(more)
             } finally {
                 allLoading = false
             }
@@ -170,6 +187,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
                 }
                 _rows.value = out
                 out.firstOrNull()?.let { wantInfo(it.items.take(2)) }
+                fixTitles(out.flatMap { it.items })
             }
             specs.withIndex().toList().mapLimit(4) { (i, s) ->
                 val items = runCatching { s.load() }.getOrElse { if (it is CancellationException) throw it; emptyList() }

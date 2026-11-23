@@ -1,10 +1,20 @@
 package com.arflix.tv.ui.screens.modes
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.arflix.tv.data.embed.EmbedSources
+import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.data.repository.ProfileManager
+import com.arflix.tv.data.repository.StreamRepository
+import com.arflix.tv.data.repository.effectiveSettingsDataStore as settingsDataStore
+import com.arflix.tv.ui.screens.collections.ServiceHomeTrailerSettings
+import com.arflix.tv.ui.screens.details.isPortugueseStream
+import com.arflix.tv.ui.screens.home.observeHomeProfilePreferences
 import com.arflix.tv.util.Constants
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,20 +22,26 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import kotlin.random.Random
@@ -45,48 +61,76 @@ internal val DORAMA_COUNTRIES = listOf(
     DoramaCountry("Tailândia", "TH")
 )
 
+/** Idioma original dos filmes de cada país (créditos de filmes não trazem país de origem). */
+private val COUNTRY_LANGS = mapOf("KR" to listOf("ko"), "JP" to listOf("ja"), "CN" to listOf("zh", "cn"), "TW" to listOf("zh"), "TH" to listOf("th"))
+
 /**
- * Aba "Doramas" do modo Netflix: só séries asiáticas (Coreia, Japão, China, Taiwan, Tailândia), sem anime,
- * reality ou talk show. Mostra TODOS os doramas (não só os da Netflix; o app toca pelas fontes da pessoa),
- * com Top 10, em alta, mais bem avaliados, joias escondidas, por gênero, "Porque você assistiu" e, no fim,
- * a fileira "Todos os doramas", que vai carregando mais conforme a pessoa anda para a direita.
+ * Aba "Doramas" do modo Netflix: só séries e filmes asiáticos (Coreia, Japão, China, Taiwan, Tailândia), sem
+ * anime, reality ou talk show. Mostra TODOS os doramas (não só os da Netflix; o app toca pelas fontes da
+ * pessoa): Continue assistindo, sua lista, em exibição (com dia do episódio novo), Top 10, "Porque você
+ * assistiu", atores que a pessoa mais vê, temas, filmes e, no fim, "Todos os doramas" com paginação.
  */
 @HiltViewModel
-internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
+internal class NetflixDoramasViewModel @Inject constructor(
+    @ApplicationContext context: Context,
+    profileManager: ProfileManager,
+    private val streamRepository: StreamRepository
+) : ViewModel() {
     private val _rows = MutableStateFlow<List<DRow>>(emptyList())
     val rows: StateFlow<List<DRow>> = _rows.asStateFlow()
     private val _loading = MutableStateFlow(true)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
     private val _country = MutableStateFlow(DORAMA_COUNTRIES.first())
     val country: StateFlow<DoramaCountry> = _country.asStateFlow()
-    /** "16 episódios • 1 temporada", por item (carregado quando a capa ganha foco). */
+    /** "16 episódios • 1 temporada" (ou "1h 52min" para filme), por item. */
     private val _info = MutableStateFlow<Map<String, String>>(emptyMap())
     val info: StateFlow<Map<String, String>> = _info.asStateFlow()
     private val _progress = MutableStateFlow<Map<String, DResume>>(emptyMap())
+    val progress: StateFlow<Map<String, DResume>> = _progress.asStateFlow()
     /** Nome em inglês para doramas sem tradução em português (senão apareceria em tailandês, chinês...). */
     private val _titles = MutableStateFlow<Map<String, String>>(emptyMap())
     val titles: StateFlow<Map<String, String>> = _titles.asStateFlow()
-    private val titleAsked = ConcurrentHashMap.newKeySet<String>()
-    val progress: StateFlow<Map<String, DResume>> = _progress.asStateFlow()
+    /** "Ep. 7 sábado", "Ep. novo hoje"... para doramas em exibição. */
+    private val _airing = MutableStateFlow<Map<String, String>>(emptyMap())
+    val airing: StateFlow<Map<String, String>> = _airing.asStateFlow()
+    /** "Dublado" / "Legendado", pelo que as fontes da pessoa oferecem (só para o item em destaque). */
+    private val _audio = MutableStateFlow<Map<String, String>>(emptyMap())
+    val audio: StateFlow<Map<String, String>> = _audio.asStateFlow()
+    /** Trailer (YouTube) do item em destaque: chave do item -> id do vídeo. */
+    private val _trailers = MutableStateFlow<Map<String, String>>(emptyMap())
+    val trailers: StateFlow<Map<String, String>> = _trailers.asStateFlow()
+
+    /** As mesmas configurações de trailer da Home (tocar sozinho, som, atraso). */
+    val trailerSettings: StateFlow<ServiceHomeTrailerSettings> = observeHomeProfilePreferences(
+        activeProfileId = profileManager.activeProfileId,
+        preferences = context.settingsDataStore.data
+    ).map { ServiceHomeTrailerSettings(autoPlay = it.trailerAutoPlay, soundEnabled = it.trailerSoundEnabled, delaySeconds = it.trailerDelaySeconds) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ServiceHomeTrailerSettings())
 
     private var seeds: List<NSSeed> = emptyList()
     private var resume: List<NetflixResume> = emptyList()
+    private var myList: List<MediaItem> = emptyList()
     private var job: Job? = null
     private var started = false
     private var round = 0
     private val infoAsked = ConcurrentHashMap.newKeySet<String>()
     private val infoGate = Semaphore(4)
+    private val titleAsked = ConcurrentHashMap.newKeySet<String>()
+    private val trailerAsked = ConcurrentHashMap.newKeySet<String>()
+    private val audioAsked = ConcurrentHashMap.newKeySet<String>()
+    private val audioGate = Semaphore(1)
 
     // "Todos os doramas": paginação sem fim.
     private var allPage = 0
     private var allTotalPages = Int.MAX_VALUE
     private var allLoading = false
 
-    fun start(seeds: List<NSSeed>, resume: List<NetflixResume>) {
+    fun start(seeds: List<NSSeed>, resume: List<NetflixResume>, myList: List<MediaItem>) {
         if (started) return
         started = true
         this.seeds = seeds
         this.resume = resume
+        this.myList = myList
         reload()
     }
 
@@ -106,35 +150,68 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         return all.filter { it.vote >= 7.8 && it.votes >= 100 }.ifEmpty { all }.randomOrNull()
     }
 
-    /** Busca nº de episódios/temporadas dos itens (cache por item). */
+    /** Busca nº de episódios/temporadas (ou duração do filme) e o próximo episódio dos itens. */
     fun wantInfo(items: List<DItem>) {
         items.filter { it.key !in _info.value && infoAsked.add(it.key) }.forEach { item ->
             viewModelScope.launch {
-                infoGate.withPermit { tmdb("/tv/${item.id}")?.let { rememberInfo(item.key, it) } }
+                infoGate.withPermit { tmdb(detailsPath(item.type, item.id))?.let { rememberInfo(item.key, item.type, it) } }
             }
         }
     }
 
     /** Troca títulos sem letras latinas pelo nome em inglês do TMDB. */
     fun fixTitles(items: List<DItem>) {
-        items.filter { it.title.none { ch -> ch in 'A'..'Z' || ch in 'a'..'z' } && titleAsked.add(it.key) }.forEach { item ->
+        items.filter { !hasLatin(it.title) && titleAsked.add(it.key) }.forEach { item ->
             viewModelScope.launch {
                 infoGate.withPermit {
-                    val en = tmdb("/tv/${item.id}", mapOf("language" to "en-US"), lang = false)?.optString("name").orEmpty()
-                    if (en.any { it in 'A'..'Z' || it in 'a'..'z' }) _titles.value = _titles.value + (item.key to en)
+                    val d = tmdb(detailsPath(item.type, item.id), mapOf("language" to "en-US"), lang = false)
+                    val en = d?.optString("name").orEmpty().ifBlank { d?.optString("title").orEmpty() }
+                    if (hasLatin(en)) _titles.value = _titles.value + (item.key to en)
                 }
             }
         }
     }
 
-    private fun rememberInfo(key: String, d: JSONObject) {
-        val eps = d.optInt("number_of_episodes")
-        val seasons = d.optInt("number_of_seasons")
-        val parts = buildList {
-            if (eps > 0) add(if (eps == 1) "1 episódio" else "$eps episódios")
-            if (seasons > 0) add(if (seasons == 1) "1 temporada" else "$seasons temporadas")
+    /** Trailer do item em destaque (português primeiro, depois qualquer idioma). */
+    fun wantTrailer(item: DItem) {
+        if (!trailerAsked.add(item.key)) return
+        viewModelScope.launch {
+            val path = "/${if (item.type == MediaType.MOVIE) "movie" else "tv"}/${item.id}/videos"
+            val videos = (tmdb(path)?.optJSONArray("results").objects() +
+                tmdb(path, mapOf("include_video_language" to "en,ko,ja,zh,th,null"), lang = false)?.optJSONArray("results").objects())
+                .filter { it.optString("site") == "YouTube" && it.optString("key").isNotBlank() }
+            val best = videos.firstOrNull { it.optString("type") == "Trailer" && it.optBoolean("official") }
+                ?: videos.firstOrNull { it.optString("type") == "Trailer" }
+                ?: videos.firstOrNull { it.optString("type") == "Teaser" }
+            best?.optString("key")?.let { _trailers.value = _trailers.value + (item.key to it) }
         }
-        if (parts.isNotEmpty()) _info.value = _info.value + (key to parts.joinToString(" • "))
+    }
+
+    /**
+     * Dublado ou legendado: pergunta às fontes da pessoa pelo 1º episódio (ou pelo filme). Áudio em português
+     * em alguma fonte = "Dublado"; só fontes sem português = "Legendado". Sem fontes, não mostra nada.
+     */
+    fun wantAudio(item: DItem) {
+        if (!audioAsked.add(item.key)) return
+        viewModelScope.launch {
+            audioGate.withPermit {
+                val imdb = if (item.type == MediaType.MOVIE) tmdb("/movie/${item.id}")?.optString("imdb_id")
+                else tmdb("/tv/${item.id}/external_ids", lang = false)?.optString("imdb_id")
+                if (imdb.isNullOrBlank() || !imdb.startsWith("tt")) return@withPermit
+                val result = withTimeoutOrNull(25_000) {
+                    runCatching {
+                        if (item.type == MediaType.MOVIE) streamRepository.resolveMovieStreams(imdb, item.title, item.year.toIntOrNull())
+                        else streamRepository.resolveEpisodeStreams(imdb, 1, 1, tmdbId = item.id, title = item.title)
+                    }.getOrElse { if (it is CancellationException) throw it; null }
+                } ?: return@withPermit
+                val label = when {
+                    result.streams.any { isPortugueseStream(it) } -> "Dublado"
+                    result.streams.any { !EmbedSources.isEmbedStream(it) } -> "Legendado"
+                    else -> null
+                }
+                label?.let { _audio.value = _audio.value + (item.key to it) }
+            }
+        }
     }
 
     /** Chamado quando a pessoa chega perto do fim da fileira "Todos os doramas". */
@@ -162,6 +239,9 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
     private class Spec(val id: String, val title: String, val ranked: Boolean = false, val rating: Boolean = false,
                        val noDedupe: Boolean = false, val limit: Int = 20, val minItems: Int = 4, val load: suspend () -> List<DItem>)
 
+    /** Dorama/filme asiático que a pessoa começou ou salvou (base das fileiras pessoais). */
+    private class LibItem(val item: DItem, val fromHistory: Boolean)
+
     private fun reload() {
         job?.cancel()
         _rows.value = emptyList()
@@ -169,7 +249,13 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         allPage = 0; allTotalPages = Int.MAX_VALUE; allLoading = false
         val rnd = Random(System.nanoTime())
         job = viewModelScope.launch {
-            val specs = plan(rnd)
+            val (cont, list) = coroutineScope {
+                val c = async { continueItems() }
+                val l = async { myListItems() }
+                c.await() to l.await()
+            }
+            val lib = cont.map { LibItem(it, true) } + list.filter { l -> cont.none { it.key == l.key } }.map { LibItem(it, false) }
+            val specs = plan(rnd, cont, list, lib)
             val done = arrayOfNulls<List<DItem>>(specs.size)
             val lock = Mutex()
             suspend fun publish() {
@@ -183,7 +269,8 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
                         else -> items.filter { it.key !in seen }.take(s.limit)
                     }
                     if (!s.noDedupe) fresh.forEach { seen += it.key }
-                    if (fresh.size >= s.minItems) out += DRow(s.id, s.title, fresh, s.ranked, s.rating)
+                    val title = actorTitles[s.id] ?: s.title
+                    if (fresh.size >= s.minItems && title.isNotBlank()) out += DRow(s.id, title, fresh, s.ranked, s.rating)
                 }
                 _rows.value = out
                 out.firstOrNull()?.let { wantInfo(it.items.take(2)) }
@@ -197,20 +284,38 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         }
     }
 
-    private fun plan(rnd: Random): List<Spec> {
+    private fun plan(rnd: Random, cont: List<DItem>, list: List<DItem>, lib: List<LibItem>): List<Spec> {
         val today = LocalDate.now()
         fun pg(max: Int) = if (round == 0) 1 else rnd.nextInt(1, max + 1)
+
+        val personal = buildList {
+            if (cont.isNotEmpty()) add(Spec(CONT_ROW, "Continue assistindo seus doramas", noDedupe = true, minItems = 1) { cont })
+            if (list.isNotEmpty()) add(Spec(LIST_ROW, "Sua lista de doramas", noDedupe = true, minItems = 1) { list })
+        }
         val top = listOf(
-            Spec(CONT_ROW, "Continue assistindo seus doramas", noDedupe = true, minItems = 1) { continueItems() },
+            Spec(AIRING_ROW, "Em exibição: episódios novos toda semana") { airingNow() },
             Spec("top10", "Top 10 doramas da semana", ranked = true) { trending() },
             Spec("hot", "Doramas em alta agora") {
                 discover(mapOf("sort_by" to "popularity.desc"), dateFrom = today.minusYears(2), page = pg(2))
             }
         )
-        val personal = seeds.filter { it.type == MediaType.TV }.takeIf { it.isNotEmpty() }?.let { list ->
-            val seed = list[(round + rnd.nextInt(0, 2)).mod(list.size)]
-            Spec("because", "Porque você assistiu ${seed.name}") { similar(seed) }
+
+        // "Porque você assistiu/salvou": até 3 fileiras, dos doramas da pessoa primeiro.
+        val becauseSeeds = (lib.filter { it.item.type == MediaType.TV }.map { Triple(it.item.id, titleOf(it.item), it.fromHistory) } +
+            seeds.filter { it.type == MediaType.TV }.map { Triple(it.id, it.name, true) })
+            .distinctBy { it.first }
+        val because = if (becauseSeeds.isEmpty()) emptyList() else {
+            val start = (round * 3).mod(becauseSeeds.size)
+            (becauseSeeds.drop(start) + becauseSeeds.take(start)).take(3).mapIndexed { i, (id, name, watched) ->
+                Spec("because$i", if (watched) "Porque você assistiu $name" else "Porque você salvou $name") { similar(id) }
+            }
         }
+        // Atores que mais aparecem nos doramas da pessoa.
+        val libTv = lib.filter { it.item.type == MediaType.TV }.map { it.item.id }.take(8)
+        val actors = if (libTv.isEmpty()) emptyList() else (0 until 2).map { i ->
+            Spec("actor$i", "") { actorRow(libTv, i) }
+        }
+
         val middle = listOf(
             Spec("best", "Os mais bem avaliados de todos os tempos", rating = true) {
                 discover(mapOf("sort_by" to "vote_average.desc", "vote_count.gte" to 250), page = pg(3))
@@ -218,11 +323,35 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
             Spec("famous", "Os doramas mais famosos") {
                 discover(mapOf("sort_by" to "vote_count.desc"), page = pg(3))
             },
+            Spec("romance", "Romances de suspirar") {
+                byKeywords(listOf("romance", "love", "first love"), pg(3))
+            },
+            Spec("movies_hot", "Filmes asiáticos em alta") {
+                discoverMovies(mapOf("sort_by" to "popularity.desc", "vote_count.gte" to 20), dateFrom = today.minusYears(3), page = pg(2))
+            },
             Spec("gems", "Joias escondidas: pouca gente viu, todo mundo amou", rating = true) {
                 discover(mapOf("sort_by" to "vote_average.desc", "vote_average.gte" to 7.8, "vote_count.gte" to 40, "vote_count.lte" to 400), page = pg(3))
             },
+            Spec("school", "Escolar e juventude") {
+                byKeywords(listOf("high school", "school", "coming of age", "youth"), pg(2))
+            },
+            Spec("sageuk", "Históricos e de época (Sageuk)") {
+                byKeywords(listOf("historical drama", "joseon dynasty", "historical", "period drama", "ancient china"), pg(2))
+            },
             Spec("new", "Lançamentos que valem o play") {
                 discover(mapOf("sort_by" to "popularity.desc", "vote_count.gte" to 10), dateFrom = today.minusDays(200), page = pg(2))
+            },
+            Spec("revenge", "Vingança") {
+                byKeywords(listOf("revenge"), pg(2))
+            },
+            Spec("office", "CEO e romance no escritório") {
+                byKeywords(listOf("office romance", "workplace romance", "ceo", "chaebol", "boss"), pg(2))
+            },
+            Spec("movies_best", "Filmes asiáticos mais bem avaliados", rating = true) {
+                discoverMovies(mapOf("sort_by" to "vote_average.desc", "vote_count.gte" to 300), page = pg(3))
+            },
+            Spec("short", "Curtinhos para maratonar") {
+                discover(mapOf("sort_by" to "popularity.desc", "with_type" to 2, "vote_count.gte" to 10), page = pg(2))
             },
             Spec("netflix", "Doramas na Netflix") {
                 discover(mapOf("sort_by" to "popularity.desc", "with_watch_providers" to NETFLIX_PROVIDER, "watch_region" to "BR",
@@ -231,23 +360,8 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
             Spec("comedy", "Comédias românticas e leves") {
                 discover(mapOf("sort_by" to "popularity.desc", "with_genres" to "35", "vote_count.gte" to 20), page = pg(3))
             },
-            Spec("romance", "Romances de suspirar") {
-                byKeywords(listOf("romance", "love", "first love"), pg(3))
-            },
-            Spec("school", "Escolar e juventude") {
-                byKeywords(listOf("high school", "school", "coming of age", "youth"), pg(2))
-            },
-            Spec("sageuk", "Históricos e de época (Sageuk)") {
-                byKeywords(listOf("historical drama", "joseon dynasty", "historical", "period drama", "ancient china"), pg(2))
-            },
-            Spec("revenge", "Vingança") {
-                byKeywords(listOf("revenge"), pg(2))
-            },
-            Spec("office", "CEO e romance no escritório") {
-                byKeywords(listOf("office romance", "workplace romance", "ceo", "chaebol", "boss"), pg(2))
-            },
-            Spec("short", "Curtinhos para maratonar") {
-                discover(mapOf("sort_by" to "popularity.desc", "with_type" to 2, "vote_count.gte" to 10), page = pg(2))
+            Spec("movies_romance", "Filmes de romance asiáticos") {
+                discoverMovies(mapOf("sort_by" to "popularity.desc", "with_genres" to "10749", "vote_count.gte" to 20), page = pg(3))
             },
             Spec("fantasy", "Fantasia e sobrenatural") {
                 discover(mapOf("sort_by" to "popularity.desc", "with_genres" to "10765", "vote_count.gte" to 20), page = pg(3))
@@ -267,9 +381,16 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         )
         val mid = if (round == 0) middle else middle.shuffled(rnd)
         return buildList {
+            addAll(personal)
             addAll(top)
-            personal?.let { add(it) }
-            addAll(mid)
+            because.firstOrNull()?.let { add(it) }
+            actors.firstOrNull()?.let { add(it) }
+            // O resto das fileiras pessoais entra no meio, espaçado.
+            val extras = because.drop(1) + actors.drop(1)
+            mid.forEachIndexed { i, s ->
+                add(s)
+                if (i % 3 == 1) extras.getOrNull(i / 3)?.let { add(it) }
+            }
             // Sempre por último: todos os doramas, do mais popular para o menos (carrega mais ao andar).
             add(Spec(ALL_ROW, "Todos os doramas", noDedupe = true) {
                 val first = allPageItems(1)
@@ -281,24 +402,82 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
 
     // ---------- Consultas ----------
 
+    private fun detailsPath(type: MediaType, id: Int) = if (type == MediaType.MOVIE) "/movie/$id" else "/tv/$id"
+
+    /** Confere país e gênero nos detalhes do TMDB; devolve o item pronto (com info guardada) ou null. */
+    private suspend fun libraryItem(type: MediaType, id: Int): DItem? {
+        val d = tmdb(detailsPath(type, id)) ?: return null
+        val codes = _country.value.codes.split('|')
+        val countries = d.optJSONArray("origin_country").strings() +
+            d.optJSONArray("production_countries").objects().map { it.optString("iso_3166_1") }.takeIf { type == MediaType.MOVIE }.orEmpty()
+        if (countries.none { it in codes }) return null
+        val genreIds = d.optJSONArray("genres").objects().map { it.optInt("id") }
+        if (genreIds.any { it in EXCLUDED_IDS }) return null
+        d.put("genre_ids", JSONArray(genreIds))
+        val item = toItem(d, type) ?: return null
+        rememberInfo(item.key, type, d)
+        return item
+    }
+
     /** Doramas que a pessoa começou (do histórico), só do país escolhido, com o progresso de cada um. */
     private suspend fun continueItems(): List<DItem> {
-        val codes = _country.value.codes.split('|')
-        val tv = resume.filter { it.item.mediaType == MediaType.TV }.distinctBy { it.item.id }
-        val found = tv.mapLimit(6) { r ->
-            val d = tmdb("/tv/${r.item.id}") ?: return@mapLimit null
-            val countries = d.optJSONArray("origin_country").strings()
-            if (countries.none { it in codes }) return@mapLimit null
-            val genreIds = d.optJSONArray("genres").objects().map { it.optInt("id") }
-            if (genreIds.any { it in EXCLUDED_IDS }) return@mapLimit null
-            d.put("genre_ids", JSONArray(genreIds))
-            val item = toItem(d) ?: return@mapLimit null
-            rememberInfo(item.key, d)
+        val list = resume.filter { it.item.mediaType == MediaType.TV || it.item.mediaType == MediaType.MOVIE }
+            .distinctBy { "${it.item.mediaType}_${it.item.id}" }
+        val found = list.mapLimit(6) { r ->
+            val item = libraryItem(r.item.mediaType, r.item.id) ?: return@mapLimit null
             val label = if (r.season != null && r.episode != null) "T${r.season}:E${r.episode}" else null
             item to DResume(r.progress, label)
         }.filterNotNull()
         _progress.value = found.associate { it.first.key to it.second }
         return found.map { it.first }
+    }
+
+    /** Doramas e filmes asiáticos da Minha lista. */
+    private suspend fun myListItems(): List<DItem> =
+        myList.filter { it.mediaType == MediaType.TV || it.mediaType == MediaType.MOVIE }
+            .distinctBy { "${it.mediaType}_${it.id}" }
+            .take(40)
+            .mapLimit(6) { libraryItem(it.mediaType, it.id) }
+            .filterNotNull()
+
+    /** Doramas com episódio indo ao ar esta semana; já busca o dia do próximo episódio de cada um. */
+    private suspend fun airingNow(): List<DItem> {
+        val today = LocalDate.now()
+        val items = discover(mapOf("sort_by" to "popularity.desc", "air_date.gte" to today.minusDays(6).toString(),
+            "air_date.lte" to today.plusDays(7).toString()))
+        wantInfo(items.take(20))
+        return items
+    }
+
+    /** Fileira "Com <ator>": o i-ésimo ator que mais aparece nos doramas da pessoa. */
+    private suspend fun actorRow(libTv: List<Int>, index: Int): List<DItem> {
+        val counts = HashMap<Int, Pair<String, Double>>()
+        val freq = HashMap<Int, Int>()
+        libTv.mapLimit(4) { tmdb("/tv/$it/aggregate_credits", lang = false)?.optJSONArray("cast").objects().take(4) }
+            .flatten()
+            .forEach { c ->
+                val id = c.optInt("id")
+                if (id <= 0) return@forEach
+                freq[id] = (freq[id] ?: 0) + 1
+                counts[id] = c.optString("name") to c.optDouble("popularity", 0.0)
+            }
+        val ranked = freq.keys.sortedWith(compareByDescending<Int> { freq[it] }.thenByDescending { counts[it]?.second ?: 0.0 })
+        val personId = ranked.getOrNull(index) ?: return emptyList()
+        val name = counts[personId]?.first.orEmpty()
+        val codes = _country.value.codes.split('|')
+        val langs = codes.flatMap { COUNTRY_LANGS[it].orEmpty() }
+        val credits = tmdb("/person/$personId/combined_credits")?.optJSONArray("cast").objects()
+        val items = credits.filter { x ->
+            when (x.optString("media_type")) {
+                "tv" -> x.optJSONArray("origin_country").strings().any { it in codes }
+                "movie" -> x.optString("original_language") in langs
+                else -> false
+            } && x.optJSONArray("genre_ids").ints().none { it in EXCLUDED_IDS } && x.optInt("vote_count") >= 3
+        }.sortedByDescending { it.optDouble("popularity", 0.0) }
+            .mapNotNull { toItem(it, if (it.optString("media_type") == "movie") MediaType.MOVIE else MediaType.TV) }
+            .distinctBy { it.key }
+        if (name.isNotBlank()) actorTitles["actor$index"] = "Com $name"
+        return items
     }
 
     /** Fileira temática por palavras-chave do TMDB (os ids são procurados pelo nome uma vez e guardados). */
@@ -338,6 +517,15 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
             .flatten().mapNotNull { toItem(it) }.distinctBy { it.key }
     }
 
+    /** Filmes asiáticos (sem animação nem documentário). */
+    private suspend fun discoverMovies(params: Map<String, Any>, page: Int = 1, dateFrom: LocalDate? = null): List<DItem> {
+        val p = mutableMapOf<String, Any>("with_origin_country" to _country.value.codes, "without_genres" to "16,99")
+        p.putAll(params)
+        dateFrom?.let { p["primary_release_date.gte"] = it.toString() }
+        return listOf(page, page + 1).mapLimit(2) { tmdb("/discover/movie", p + ("page" to it))?.optJSONArray("results").objects() }
+            .flatten().mapNotNull { toItem(it, MediaType.MOVIE) }.distinctBy { it.key }
+    }
+
     /** Em alta da semana no TMDB, só doramas. Completa com os populares se o "em alta" vier curto. */
     private suspend fun trending(): List<DItem> {
         val pool = (1..5).toList().mapLimit(3) { tmdb("/trending/tv/week", mapOf("page" to it)) }
@@ -349,43 +537,80 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         return (pool + discover(mapOf("sort_by" to "popularity.desc"), dateFrom = LocalDate.now().minusYears(1))).distinctBy { it.key }
     }
 
-    private suspend fun similar(seed: NSSeed): List<DItem> {
-        if (seed.type != MediaType.TV) return emptyList()
+    private suspend fun similar(id: Int): List<DItem> {
         val (rec, sim) = coroutineScope {
-            val r = async { tmdb("/tv/${seed.id}/recommendations") }
-            val s = async { tmdb("/tv/${seed.id}/similar") }
+            val r = async { tmdb("/tv/$id/recommendations") }
+            val s = async { tmdb("/tv/$id/similar") }
             r.await() to s.await()
         }
         return (rec?.optJSONArray("results").objects() + sim?.optJSONArray("results").objects())
-            .filter { isDorama(it) }
+            .filter { isDorama(it) && it.optInt("id") != id }
             .mapNotNull { toItem(it) }
             .distinctBy { it.key }
     }
 
     private fun isDorama(x: JSONObject): Boolean {
-        val countries = x.optJSONArray("origin_country")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
+        val countries = x.optJSONArray("origin_country").strings()
         if (countries.none { it in _country.value.codes.split('|') }) return false
         val ids = x.optJSONArray("genre_ids").ints()
         return ids.none { it in EXCLUDED_IDS }
     }
 
-    private fun toItem(x: JSONObject): DItem? {
+    private fun rememberInfo(key: String, type: MediaType, d: JSONObject) {
+        val parts = buildList {
+            if (type == MediaType.MOVIE) {
+                val min = d.optInt("runtime")
+                if (min > 0) add(if (min >= 60) "${min / 60}h ${"%02d".format(min % 60)}min" else "${min}min")
+            } else {
+                val eps = d.optInt("number_of_episodes")
+                val seasons = d.optInt("number_of_seasons")
+                if (eps > 0) add(if (eps == 1) "1 episódio" else "$eps episódios")
+                if (seasons > 0) add(if (seasons == 1) "1 temporada" else "$seasons temporadas")
+            }
+        }
+        if (parts.isNotEmpty()) _info.value = _info.value + (key to parts.joinToString(" • "))
+        if (type == MediaType.TV) airingLabel(d)?.let { _airing.value = _airing.value + (key to it) }
+    }
+
+    /** "Ep. novo hoje", "Ep. 7 amanhã", "Ep. 7 sábado" ou "Ep. 7 em 28/11". */
+    private fun airingLabel(d: JSONObject): String? {
+        val today = LocalDate.now()
+        val next = d.optJSONObject("next_episode_to_air")
+        val last = d.optJSONObject("last_episode_to_air")
+        val lastDate = last?.optString("air_date")?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+        if (lastDate == today) return "Ep. novo hoje"
+        val nextDate = next?.optString("air_date")?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return null
+        val ep = next.optInt("episode_number").takeIf { it > 0 }?.let { "Ep. $it" } ?: "Ep. novo"
+        val days = java.time.temporal.ChronoUnit.DAYS.between(today, nextDate)
+        return when {
+            days < 0 -> null
+            days == 0L -> "$ep hoje"
+            days == 1L -> "$ep amanhã"
+            days <= 6 -> "$ep ${WEEKDAYS[nextDate.dayOfWeek]}"
+            days <= 60 -> "$ep em ${nextDate.format(DateTimeFormatter.ofPattern("dd/MM"))}"
+            else -> null
+        }
+    }
+
+    private fun toItem(x: JSONObject, type: MediaType = MediaType.TV): DItem? {
         if (x.optJSONArray("genre_ids").ints().any { it in EXCLUDED_IDS }) return null
         val backdrop = x.optString("backdrop_path").takeIf { it.startsWith("/") } ?: return null
         val title = x.optString("name").ifBlank { x.optString("title") }.ifBlank { return null }
         return DItem(
-            type = MediaType.TV,
+            type = type,
             id = x.optInt("id"),
             title = title,
             backdrop = "$IMG/w780$backdrop",
             poster = x.optString("poster_path").takeIf { it.startsWith("/") }?.let { "$IMG/w342$it" },
             overview = x.optString("overview"),
-            year = x.optString("first_air_date").take(4),
+            year = x.optString("first_air_date").ifBlank { x.optString("release_date") }.take(4),
             vote = x.optDouble("vote_average", 0.0),
             votes = x.optInt("vote_count"),
             genres = x.optJSONArray("genre_ids").ints().mapNotNull { GENRE_NAMES[it] }.distinct()
         )
     }
+
+    private fun titleOf(item: DItem) = _titles.value[item.key] ?: item.title
 
     private suspend fun tmdb(path: String, params: Map<String, Any> = emptyMap(), lang: Boolean = true): JSONObject? {
         val all = buildMap<String, Any> {
@@ -412,6 +637,7 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         }
     }
 
+    private fun hasLatin(s: String) = s.any { it in 'A'..'Z' || it in 'a'..'z' }
     private fun JSONArray?.objects(): List<JSONObject> = if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
     private fun JSONArray?.strings(): List<String> = if (this == null) emptyList() else (0 until length()).map { optString(it) }
     private fun JSONArray?.ints(): List<Int> = if (this == null) emptyList() else (0 until length()).map { optInt(it) }
@@ -421,9 +647,14 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         map { async { gate.withPermit { f(it) } } }.awaitAll()
     }
 
+    /** Título das fileiras de ator ("Com Lee Min-ho"), conhecido só depois de carregar. */
+    private val actorTitles = ConcurrentHashMap<String, String>()
+
     companion object {
         const val ALL_ROW = "all"
         const val CONT_ROW = "continue"
+        const val LIST_ROW = "mylist"
+        const val AIRING_ROW = "airing"
         private val keywordIds = ConcurrentHashMap<String, Int>()
         private const val NETFLIX_PROVIDER = 8
         private const val IMG = "https://image.tmdb.org/t/p"
@@ -431,9 +662,14 @@ internal class NetflixDoramasViewModel @Inject constructor() : ViewModel() {
         private val EXCLUDED_IDS = setOf(16, 10762, 10763, 10764, 10767)
         private val EXCLUDED_GENRES = EXCLUDED_IDS.joinToString(",")
         private val cache = ConcurrentHashMap<String, JSONObject>()
+        private val WEEKDAYS = mapOf(
+            DayOfWeek.MONDAY to "segunda", DayOfWeek.TUESDAY to "terça", DayOfWeek.WEDNESDAY to "quarta", DayOfWeek.THURSDAY to "quinta",
+            DayOfWeek.FRIDAY to "sexta", DayOfWeek.SATURDAY to "sábado", DayOfWeek.SUNDAY to "domingo"
+        )
         private val GENRE_NAMES = mapOf(
             35 to "Comédia", 80 to "Policial", 18 to "Drama", 10751 to "Família", 9648 to "Mistério",
-            10759 to "Ação", 10765 to "Fantasia", 10766 to "Novela", 10768 to "Política", 37 to "Faroeste", 99 to "Documentário"
+            10759 to "Ação", 10765 to "Fantasia", 10766 to "Novela", 10768 to "Política", 37 to "Faroeste", 99 to "Documentário",
+            28 to "Ação", 12 to "Aventura", 10749 to "Romance", 53 to "Suspense", 27 to "Terror", 14 to "Fantasia", 878 to "Ficção científica"
         )
     }
 }

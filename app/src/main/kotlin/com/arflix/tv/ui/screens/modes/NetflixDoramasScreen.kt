@@ -1,5 +1,7 @@
 package com.arflix.tv.ui.screens.modes
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -39,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +50,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -73,6 +77,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.ui.components.TrailerPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -90,6 +95,9 @@ private sealed class KChip(val label: String) {
     object Refresh : KChip("Atualizar")
     class Country(val country: DoramaCountry) : KChip(country.label)
 }
+
+/** Vinheta da aba já tocada nesta abertura do app. */
+private var doramaIntroPlayed = false
 
 private fun kRating(v: Double) = String.format(Locale("pt", "BR"), "%.1f", v)
 
@@ -112,6 +120,11 @@ internal fun NetflixDoramasScreen(
     val info by viewModel.info.collectAsStateWithLifecycle()
     val progress by viewModel.progress.collectAsStateWithLifecycle()
     val titles by viewModel.titles.collectAsStateWithLifecycle()
+    val airing by viewModel.airing.collectAsStateWithLifecycle()
+    val audio by viewModel.audio.collectAsStateWithLifecycle()
+    val trailers by viewModel.trailers.collectAsStateWithLifecycle()
+    val trailerSettings by viewModel.trailerSettings.collectAsStateWithLifecycle()
+    var showIntro by remember { mutableStateOf(!doramaIntroPlayed) }
 
     LaunchedEffect(Unit) {
         extras.refresh()
@@ -121,7 +134,8 @@ internal fun NetflixDoramasScreen(
             .filter { it.mediaType == MediaType.TV }
             .distinctBy { it.id }
             .map { NSSeed(it.mediaType, it.id, it.title) }
-        viewModel.start(seeds, resumeList)
+        val myList = withTimeoutOrNull(1_500) { extras.myList.first { it.isNotEmpty() } } ?: extras.myList.value
+        viewModel.start(seeds, resumeList, myList)
     }
 
     val chips = remember { listOf(KChip.Surprise, KChip.Refresh) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
@@ -140,8 +154,16 @@ internal fun NetflixDoramasScreen(
     }
     LaunchedEffect(item?.key) {
         row?.let { viewModel.wantInfo(it.items.drop(col).take(3)) }
+        item?.let { viewModel.wantTrailer(it) }
         // "Todos os doramas": perto do fim, busca a próxima página.
         if (row?.id == NetflixDoramasViewModel.ALL_ROW && col >= row.items.size - 8) viewModel.loadMoreAll()
+    }
+
+    // Dublado/legendado: só pergunta às fontes se a pessoa parar no item.
+    LaunchedEffect(item?.key) {
+        val current = item ?: return@LaunchedEffect
+        delay(2_500)
+        viewModel.wantAudio(current)
     }
 
     fun pressChip() {
@@ -161,6 +183,7 @@ internal fun NetflixDoramasScreen(
         Modifier.fillMaxSize().background(Plum).focusRequester(focus).focusable()
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent true
+                if (showIntro) return@onPreviewKeyEvent ev.key != Key.Back
                 if (inBar) when (ev.key) {
                     Key.DirectionLeft -> { chipIndex = (chipIndex - 1).coerceAtLeast(0); true }
                     Key.DirectionRight -> { chipIndex = (chipIndex + 1).coerceAtMost(chips.size - 1); true }
@@ -191,6 +214,13 @@ internal fun NetflixDoramasScreen(
         Box(Modifier.fillMaxWidth().height(previewH)) {
             Box(Modifier.fillMaxHeight().fillMaxWidth(0.7f).align(Alignment.TopEnd)) {
                 item?.backdrop?.let { AsyncImage(model = it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                val trailerKey = item?.let { trailers[it.key] }
+                if (trailerKey != null && trailerSettings.autoPlay && !showIntro) {
+                    key(trailerKey) {
+                        TrailerPlayer(youtubeKey = trailerKey, delayMs = trailerSettings.delaySeconds * 1000L + 1500L,
+                            volume = if (trailerSettings.soundEnabled) 1f else 0f, modifier = Modifier.fillMaxSize())
+                    }
+                }
                 Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Plum, 0.35f to Plum.copy(alpha = 0.6f), 0.7f to Color.Transparent)))
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Plum.copy(alpha = 0.7f), 0.25f to Color.Transparent, 0.6f to Color.Transparent, 1f to Plum)))
                 // Véu rosa leve por cima da imagem.
@@ -229,6 +259,12 @@ internal fun NetflixDoramasScreen(
                     PinkTop10Badge()
                     Spacer(Modifier.width(8.dp))
                     Text("Nº ${col + 1} entre os doramas desta semana", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                } else airing[item.key]?.let { a ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AiringPill(a)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Em exibição: episódios novos toda semana", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -238,7 +274,13 @@ internal fun NetflixDoramasScreen(
                         Text(kRating(item.vote), color = DoramaPink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(10.dp))
                     }
-                    val meta = listOfNotNull("Dorama", item.year.ifBlank { null }, info[item.key]) + item.genres.take(2)
+                    audio[item.key]?.let { a ->
+                        Text(a.uppercase(), color = DoramaPink, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp,
+                            modifier = Modifier.border(1.dp, DoramaPink, RoundedCornerShape(3.dp)).padding(horizontal = 5.dp, vertical = 1.dp))
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    val kind = if (item.type == MediaType.MOVIE) "Filme" else "Dorama"
+                    val meta = listOfNotNull(kind, item.year.ifBlank { null }, info[item.key]) + item.genres.take(2)
                     Text(meta.joinToString("  •  "), color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (item.overview.isNotBlank()) {
@@ -311,7 +353,7 @@ internal fun NetflixDoramasScreen(
                             horizontalArrangement = Arrangement.spacedBy(if (r.ranked) 4.dp else 8.dp)) {
                             itemsIndexed(r.items, key = { _, it -> it.key }) { j, it ->
                                 val f = focusedRow && j == c
-                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress, f, r.rating)
+                                if (r.ranked) KRankCard(j + 1, it, f) else KCard(it, titles[it.key] ?: it.title, progress[it.key]?.progress, airing[it.key], f, r.rating)
                             }
                         }
                         Box(Modifier.width(56.dp).height(if (r.ranked) 160.dp else 110.dp)
@@ -320,7 +362,40 @@ internal fun NetflixDoramasScreen(
                 }
             }
         }
+        if (showIntro) DoramaIntro { doramaIntroPlayed = true; showIntro = false }
     }
+}
+
+/** Vinheta da aba: coração e "DORAMAS" em rosa crescendo e sumindo (uma vez por abertura do app). */
+@Composable
+private fun DoramaIntro(onDone: () -> Unit) {
+    val scale = remember { Animatable(0.7f) }
+    val alpha = remember { Animatable(0f) }
+    val bg = remember { Animatable(1f) }
+    LaunchedEffect(Unit) {
+        alpha.animateTo(1f, tween(300))
+        scale.animateTo(1.1f, tween(850, easing = FastOutSlowInEasing))
+        scale.animateTo(5f, tween(420, easing = FastOutSlowInEasing))
+        alpha.animateTo(0f, tween(150))
+        bg.animateTo(0f, tween(250))
+        onDone()
+    }
+    Box(Modifier.fillMaxSize().alpha(bg.value).background(Brush.radialGradient(listOf(PinkDeep.copy(alpha = 0.55f), Plum), radius = 1400f)),
+        contentAlignment = Alignment.Center) {
+        Row(Modifier.scale(scale.value).alpha(alpha.value), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Favorite, contentDescription = null, tint = DoramaPink, modifier = Modifier.size(64.dp))
+            Spacer(Modifier.width(14.dp))
+            Text("DORAMAS", color = DoramaPink, fontSize = 72.sp, fontWeight = FontWeight.Black, letterSpacing = 8.sp,
+                style = TextStyle(shadow = Shadow(PinkSoft.copy(alpha = 0.6f), blurRadius = 30f)))
+        }
+    }
+}
+
+/** Selo "Ep. 7 sábado" / "Ep. novo hoje". */
+@Composable
+private fun AiringPill(text: String, modifier: Modifier = Modifier, small: Boolean = false) {
+    Text(text, color = Color.White, fontSize = if (small) 9.sp else 11.sp, fontWeight = FontWeight.Black, maxLines = 1,
+        modifier = modifier.background(DoramaPink, RoundedCornerShape(3.dp)).padding(horizontal = if (small) 4.dp else 6.dp, vertical = 1.dp))
 }
 
 /** Barra de progresso rosa (quanto já foi assistido). */
@@ -352,7 +427,7 @@ private fun KHint(text: String, icon: ImageVector, primary: Boolean) {
 }
 
 @Composable
-private fun KCard(item: DItem, name: String, progress: Int?, focused: Boolean, showRating: Boolean) {
+private fun KCard(item: DItem, name: String, progress: Int?, airing: String?, focused: Boolean, showRating: Boolean) {
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(160), label = "kc")
     Box(
         Modifier.zIndex(if (focused) 1f else 0f).scale(scale).size(width = 176.dp, height = 99.dp).clip(RoundedCornerShape(6.dp))
@@ -365,6 +440,7 @@ private fun KCard(item: DItem, name: String, progress: Int?, focused: Boolean, s
         Text(name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 8.dp, bottom = if (hasBar) 12.dp else 6.dp))
         if (hasBar) PinkProgress(progress!!, Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 5.dp))
+        if (airing != null) AiringPill(airing, Modifier.align(Alignment.TopStart).padding(5.dp), small = true)
         if (showRating && item.vote > 0) {
             Row(Modifier.align(Alignment.TopEnd).padding(5.dp).background(Plum.copy(alpha = 0.8f), RoundedCornerShape(3.dp))
                 .padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -4491,6 +4491,22 @@ private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewMod
                     }
                 },
                 onExit = onExitPlayer,
+                // Enquanto a página procura o vídeo escondida, aparece a mesma tela de carregamento do player.
+                loadingCover = {
+                    Box(Modifier.fillMaxSize().background(Color.Black)) {
+                        PlayerLoadingOverlay(
+                            uiState = uiState,
+                            hasPlaybackStarted = false,
+                            isTouchDevice = isTouchDevice,
+                            isInPipMode = false,
+                            showSourceMenu = false,
+                            onExitPlayer = onExitPlayer,
+                            startupPhase = null,
+                            switchNotice = null,
+                            netflix = netflixPlayer
+                        )
+                    }
+                },
                 onResolved = { mediaUrl, headers ->
                     // A página entregou o endereço do vídeo: toca no player do app (imagem, controles e qualidade nativos).
                     uiState.selectedStream?.let { sel ->

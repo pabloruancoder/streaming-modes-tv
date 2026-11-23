@@ -100,6 +100,8 @@ internal fun EmbedPlayerOverlay(
     onExit: () -> Unit,
     /** Endereço do vídeo que a própria página carregou (HLS/MP4) + cabeçalhos: toca no player do app. */
     onResolved: (url: String, headers: Map<String, String>) -> Unit = { _, _ -> },
+    /** Tela de carregamento que tapa a página enquanto ela procura o vídeo escondida. */
+    loadingCover: @Composable () -> Unit = { Box(Modifier.fillMaxSize().background(Color.Black)) },
 ) {
     val apiPlayer = embed.provider.streamBetterApi
     var positionS by remember(embed) { mutableFloatStateOf(0f) }
@@ -129,9 +131,34 @@ internal fun EmbedPlayerOverlay(
     val focus = remember { FocusRequester() }
     val onResolvedState by rememberUpdatedState(onResolved)
     var resolveGaveUp by remember(embed) { mutableStateOf(false) }
+    // Reprodução direta: a página do StreamBetter carrega escondida atrás da tela de carregamento e o vídeo
+    // vai para o player do app. Ela só aparece se a Cloudflare pedir a verificação (ou se demorar demais).
+    var revealed by remember(embed) { mutableStateOf(!apiPlayer) }
+    var revealReason by remember(embed) { mutableStateOf("") }
+    var cfSeenAt by remember(embed) { mutableLongStateOf(0L) }       // pediu algo de challenges.cloudflare.com
+    var cfVisibleSince by remember(embed) { mutableLongStateOf(0L) } // caixa da verificação visível na página
+    var cfRect by remember(embed) { mutableStateOf<FloatArray?>(null) } // x, y, w, h em px de CSS
+    var progressSince by remember(embed) { mutableLongStateOf(0L) }
+    val density = context.resources.displayMetrics.density
     val webView = remember(embed) {
-        createEmbedWebView(context) { url, headers ->
+        createEmbedWebView(
+            context,
+            onChallenge = { if (cfSeenAt == 0L) cfSeenAt = SystemClock.uptimeMillis() }
+        ) { url, headers ->
             if (!resolveGaveUp) onResolvedState(url, headers)
+        }
+    }
+    fun reveal(reason: String, cursor: Boolean) {
+        if (revealed) return
+        revealed = true
+        revealReason = reason
+        if (cursor && !gotProgress) {
+            cursorMode = true
+            // Cursor já em cima da caixinha da Cloudflare (fica à esquerda do quadro da verificação).
+            cfRect?.let { r ->
+                cursorX = ((r[0] + 28f) * density).coerceIn(0f, areaW - 1f)
+                cursorY = ((r[1] + r[3] / 2f) * density).coerceIn(0f, areaH - 1f)
+            }
         }
     }
 
@@ -156,6 +183,16 @@ internal fun EmbedPlayerOverlay(
                 main.post {
                     val msg = runCatching { JSONObject(raw) }.getOrNull() ?: return@post
                     val type = msg.optString("type")
+                    if (type == "sm-bridge:cf") {
+                        if (msg.optBoolean("visible")) {
+                            if (cfVisibleSince == 0L) cfVisibleSince = SystemClock.uptimeMillis()
+                            cfRect = floatArrayOf(
+                                msg.optDouble("x").toFloat(), msg.optDouble("y").toFloat(),
+                                msg.optDouble("w").toFloat(), msg.optDouble("h").toFloat()
+                            )
+                        } else cfVisibleSince = 0L
+                        return@post
+                    }
                     if (type != "streambetter:progress" && type != "sm-bridge:progress") return@post
                     val t = msg.optDouble("currentTime", 0.0).toFloat()
                     val d = msg.optDouble("duration", 0.0).toFloat()
@@ -171,6 +208,7 @@ internal fun EmbedPlayerOverlay(
                     if (!gotProgress && d > 0f) {
                         gotProgress = true
                         cursorMode = false
+                        progressSince = SystemClock.uptimeMillis()
                     }
                     if (!resumeDone && d > 0f) {
                         resumeDone = true
@@ -209,14 +247,24 @@ internal fun EmbedPlayerOverlay(
             nowTick = SystemClock.uptimeMillis()
             // O site só começa com um "play": manda a cada 2 s nos primeiros 45 s, até tocar.
             if (!playing && !userPaused && nowTick - openedAt < 45_000L && (nowTick - openedAt) % 2_000L < 500L) play()
-            if (!resolveGaveUp && nowTick - openedAt > 40_000L) {
+            val waited = nowTick - openedAt
+            // A página já toca (escondida) mas o endereço do vídeo não apareceu: desiste e mostra a página.
+            val stuckPlaying = gotProgress && progressSince > 0L && nowTick - progressSince > 8_000L
+            if (!resolveGaveUp && (waited > 40_000L || stuckPlaying)) {
                 resolveGaveUp = true
                 send("{type:'sm-bridge:cmd',cmd:'unmute'}")
+                reveal("", cursor = false)
+            }
+            if (!revealed) {
+                when {
+                    // A caixa "Confirme que é humano" ficou na tela (a que passa sozinha some em 1–3 s).
+                    cfVisibleSince > 0L && nowTick - cfVisibleSince > 4_000L -> reveal("cf", cursor = true)
+                    // A verificação carregou mas o vídeo não veio (caixa escondida onde não dá para ver).
+                    cfSeenAt > 0L && nowTick - cfSeenAt > 12_000L -> reveal("cf", cursor = true)
+                    waited > 20_000L -> reveal("slow", cursor = true)
+                }
             }
             if (apiPlayer && !gotProgress && !failed) {
-                val waited = nowTick - openedAt
-                // A página pode estar pedindo a verificação da Cloudflare: liga o cursor para a pessoa clicar.
-                if (waited > 15_000L && !cursorMode && !cursorUsed) cursorMode = true
                 val limit = if (cursorUsed) 180_000L else 60_000L
                 if (waited > limit) { failed = true; onFailed() }
             }
@@ -266,6 +314,15 @@ internal fun EmbedPlayerOverlay(
             .focusable()
             .onPreviewKeyEvent { ev ->
                 val down = ev.type == KeyEventType.KeyDown
+                if (!revealed) {
+                    // Carregando escondido: Voltar sai, ☰ mostra a página (caso a pessoa queira ver/verificar).
+                    if (down) when (ev.key) {
+                        Key.Back -> onExit()
+                        Key.Menu -> reveal("cf", cursor = true)
+                        else -> {}
+                    }
+                    return@onPreviewKeyEvent ev.key in HANDLED_KEYS
+                }
                 if (cursorMode) {
                     val step = 48f
                     when (ev.key) {
@@ -316,8 +373,14 @@ internal fun EmbedPlayerOverlay(
     ) {
         AndroidView(factory = { webView }, modifier = Modifier.fillMaxSize())
 
+        // A página continua carregando por baixo (precisa estar "na tela" para o site rodar); a capa tapa tudo.
+        if (!revealed) {
+            Box(Modifier.fillMaxSize()) { loadingCover() }
+            return@Box
+        }
+
         val providerLabel = "${EmbedSources.ADDON_NAME} · ${embed.provider.name}"
-        if (!gotProgress && apiPlayer) {
+        if (!gotProgress && apiPlayer && !cursorMode) {
             InfoCard(
                 text = "$providerLabel — preparando o vídeo…",
                 modifier = Modifier.align(Alignment.TopStart).padding(32.dp)
@@ -325,8 +388,12 @@ internal fun EmbedPlayerOverlay(
         }
         if (cursorMode) {
             InfoCard(
-                text = if (apiPlayer) "Cursor: setas movem · OK clica · ☰ esconde"
-                else "$providerLabel · cursor: setas movem · OK clica · Voltar sai",
+                text = when {
+                    !apiPlayer -> "$providerLabel · cursor: setas movem · OK clica · Voltar sai"
+                    revealReason == "cf" && !cursorUsed ->
+                        "Verificação do $providerLabel: aperte OK na caixinha (setas movem o cursor). Depois o vídeo começa sozinho."
+                    else -> "Cursor: setas movem · OK clica · ☰ esconde"
+                },
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp)
             )
             val d = LocalDensity.current
@@ -450,6 +517,7 @@ private val AD_HOSTS = listOf(
 @SuppressLint("SetJavaScriptEnabled")
 private fun createEmbedWebView(
     context: android.content.Context,
+    onChallenge: () -> Unit = {},
     onMedia: (url: String, headers: Map<String, String>) -> Unit
 ): WebView = WebView(context).apply {
     val resolved = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -492,6 +560,7 @@ private fun createEmbedWebView(
             if (AD_HOSTS.any { host.contains(it) }) {
                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
             }
+            if (host == "challenges.cloudflare.com") main.post { onChallenge() }
             // O vídeo que o player da página pede (lista HLS ou MP4): vai para o player do app.
             val req = request!!
             val url = req.url.toString()
@@ -544,6 +613,21 @@ private val BRIDGE_JS = """
       state: v.ended?'ended':(v.paused?'paused':'playing')}, '*'); } catch(e){} }
   // Sem som enquanto o app procura o endereço do vídeo (ele toca no player do app); 'unmute' devolve o som.
   setInterval(function(){ var v=pick(); if (v) { if (!window.__smUnmuted) v.muted=true; clear(v); post(v); } }, 500);
+  // Verificação da Cloudflare: avisa o app se a caixa "Confirme que é humano" está visível e onde.
+  // (Só olha os elementos; nada é mexido dentro do quadro da Cloudflare.)
+  if (location.hostname !== 'challenges.cloudflare.com') {
+    var cfLast='';
+    function cfFrames(root, out){ out=out||[]; root.querySelectorAll('iframe').forEach(function(f){ if ((f.src||'').indexOf('challenges.cloudflare.com')>=0) out.push(f); });
+      root.querySelectorAll('*').forEach(function(el){ if (el.shadowRoot) cfFrames(el.shadowRoot, out); }); return out; }
+    setInterval(function(){
+      var box=null;
+      cfFrames(document).forEach(function(f){ var r=f.getBoundingClientRect(); var cs=getComputedStyle(f);
+        if (r.width>=100 && r.height>=40 && cs.visibility!=='hidden' && cs.display!=='none' && cs.opacity!=='0') box=r; });
+      var msg = box ? {type:'sm-bridge:cf', visible:true, x:box.left, y:box.top, w:box.width, h:box.height} : {type:'sm-bridge:cf', visible:false};
+      var key = box ? 'v'+Math.round(box.left)+','+Math.round(box.top) : 'h';
+      if (key!==cfLast) { cfLast=key; try { window.top.postMessage(msg,'*'); } catch(e){} }
+    }, 500);
+  }
   window.addEventListener('message', function(e){
     var m=e.data; if (!m || m.type!=='sm-bridge:cmd') return;
     var v=pick();

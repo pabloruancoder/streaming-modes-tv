@@ -127,6 +127,13 @@ internal class NetflixDoramasViewModel @Inject constructor(
     val dubScan: StateFlow<Pair<Int, Int>> = _dubScan.asStateFlow()
     private var dubJob: Job? = null
 
+    // Busca só de doramas (séries e filmes asiáticos do país escolhido).
+    private val _searchResults = MutableStateFlow<List<DItem>>(emptyList())
+    val searchResults: StateFlow<List<DItem>> = _searchResults.asStateFlow()
+    private val _searching = MutableStateFlow(false)
+    val searching: StateFlow<Boolean> = _searching.asStateFlow()
+    private var searchJob: Job? = null
+
     /** As mesmas configurações de trailer da Home (tocar sozinho, som, atraso). */
     val trailerSettings: StateFlow<ServiceHomeTrailerSettings> = observeHomeProfilePreferences(
         activeProfileId = profileManager.activeProfileId,
@@ -317,6 +324,35 @@ internal class NetflixDoramasViewModel @Inject constructor(
                 checkAudio(item)
                 _dubScan.value = (_dubScan.value.first + 1) to _dubScan.value.second
             }
+        }
+    }
+
+    /** Busca enquanto a pessoa digita (espera ela parar um pouco). Vazio = limpa. */
+    fun search(query: String) {
+        searchJob?.cancel()
+        val q = query.trim()
+        if (q.length < 2) { _searchResults.value = emptyList(); _searching.value = false; return }
+        _searching.value = true
+        searchJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(350)
+            val codes = _country.value.codes.split('|')
+            val langs = codes.flatMap { COUNTRY_LANGS[it].orEmpty() }
+            val hiddenNow = _hidden.value
+            val (tv, movies) = coroutineScope {
+                val t = async { listOf(1, 2).mapLimit(2) { tmdb("/search/tv", mapOf("query" to q, "page" to it))?.optJSONArray("results").objects() }.flatten() }
+                val m = async { tmdb("/search/movie", mapOf("query" to q))?.optJSONArray("results").objects() }
+                t.await() to m.await()
+            }
+            val shows = tv.filter { isDorama(it) }.map { it to MediaType.TV }
+            val films = movies.filter { it.optString("original_language") in langs && it.optJSONArray("genre_ids").ints().none { g -> g == 16 } }
+                .map { it to MediaType.MOVIE }
+            _searchResults.value = (shows + films)
+                .sortedByDescending { it.first.optDouble("popularity", 0.0) }
+                .mapNotNull { toItem(it.first, it.second) }
+                .filter { it.key !in hiddenNow }
+                .distinctBy { it.key }
+            fixTitles(_searchResults.value)
+            _searching.value = false
         }
     }
 

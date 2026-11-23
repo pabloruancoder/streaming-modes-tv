@@ -34,6 +34,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Info
@@ -95,12 +101,18 @@ private val Plum = Color(0xFF16070F)      // fundo
 private val PlumCard = Color(0xFF2A0F1F)  // capa sem imagem / esqueleto
 
 private sealed class KChip(val label: String) {
+    object Search : KChip("")
     object Surprise : KChip("Surpreenda-me")
     object Refresh : KChip("Atualizar")
     object Calendar : KChip("Calendário")
     object Dub : KChip("Só dublados")
     class Country(val country: DoramaCountry) : KChip(country.label)
 }
+
+/** Teclado da busca: espaço e apagar em cima, letras e números em 6 colunas (como o da Netflix). */
+private const val DKB_COLS = 6
+private val DKB_KEYS: List<String> = listOf("␣", "⌫") + ('a'..'z').map { it.toString() } + (1..9).map { it.toString() } + listOf("0")
+private const val DS_COLS = 3
 
 /** Vinheta da aba já tocada nesta abertura do app. */
 private var doramaIntroPlayed = false
@@ -163,9 +175,19 @@ internal fun NetflixDoramasScreen(
         viewModel.start(seeds, resumeList, myList)
     }
 
-    val chips = remember { listOf(KChip.Surprise, KChip.Refresh, KChip.Calendar, KChip.Dub) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
+    val chips = remember { listOf(KChip.Search, KChip.Surprise, KChip.Refresh, KChip.Calendar, KChip.Dub) + DORAMA_COUNTRIES.map { KChip.Country(it) } }
     var inBar by rememberSaveable { mutableStateOf(false) }
-    var chipIndex by rememberSaveable { mutableIntStateOf(4) }
+    var chipIndex by rememberSaveable { mutableIntStateOf(5) }
+    // Busca de doramas: teclado à esquerda, resultados em grade à direita.
+    var searchOn by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var searchInGrid by rememberSaveable { mutableStateOf(false) }
+    var keyIndex by rememberSaveable { mutableIntStateOf(2) }
+    var resIndex by rememberSaveable { mutableIntStateOf(0) }
+    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val searching by viewModel.searching.collectAsStateWithLifecycle()
+    // Sem texto (ou 1 letra): mostra o Top 10 da semana como sugestão.
+    val searchShown = if (query.trim().length >= 2) searchResults else homeRows.firstOrNull { it.id == "top10" }?.items.orEmpty()
     var rowIndex by rememberSaveable { mutableIntStateOf(0) }
     val cols = remember { mutableStateMapOf<String, Int>() }
 
@@ -225,6 +247,7 @@ internal fun NetflixDoramasScreen(
 
     fun pressChip() {
         when (val c = chips[chipIndex]) {
+            KChip.Search -> { searchOn = true; searchInGrid = false }
             KChip.Surprise -> viewModel.surprise()?.let { onOpen(it.type, it.id) }
             KChip.Refresh -> { if (calendarOn) { calendarOn = false; rowIndex = homeRowIndex }; viewModel.refresh() }
             KChip.Calendar -> toggleCalendar()
@@ -254,6 +277,48 @@ internal fun NetflixDoramasScreen(
                             action?.invoke()
                         }
                         Key.Back, Key.Menu -> { menuItem = null; menuRestore = false }
+                        else -> {}
+                    }
+                    return@onPreviewKeyEvent true
+                }
+                if (searchOn) {
+                    fun press(k: String) {
+                        query = when (k) { "⌫" -> query.dropLast(1); "␣" -> if (query.isEmpty() || query.endsWith(" ")) query else "$query "; else -> query + k }
+                        resIndex = 0
+                        viewModel.search(query)
+                    }
+                    fun col(i: Int) = (i - 2) % DKB_COLS
+                    if (!searchInGrid) when (ev.key) {
+                        Key.DirectionLeft -> { if (keyIndex == 1) keyIndex = 0 else if (keyIndex >= 2 && col(keyIndex) > 0) keyIndex-- }
+                        Key.DirectionRight -> when {
+                            keyIndex == 0 -> keyIndex = 1
+                            keyIndex == 1 || (keyIndex >= 2 && col(keyIndex) == DKB_COLS - 1) || keyIndex == DKB_KEYS.size - 1 ->
+                                { if (searchShown.isNotEmpty()) { searchInGrid = true; resIndex = resIndex.coerceIn(0, searchShown.size - 1) } }
+                            else -> keyIndex++
+                        }
+                        Key.DirectionUp -> keyIndex = when {
+                            keyIndex < 2 -> keyIndex
+                            keyIndex < 2 + DKB_COLS -> if (col(keyIndex) < 3) 0 else 1
+                            else -> keyIndex - DKB_COLS
+                        }
+                        Key.DirectionDown -> keyIndex = when {
+                            keyIndex == 0 -> 2
+                            keyIndex == 1 -> 5
+                            keyIndex + DKB_COLS < DKB_KEYS.size -> keyIndex + DKB_COLS
+                            else -> keyIndex
+                        }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> press(DKB_KEYS[keyIndex])
+                        Key.Back -> searchOn = false
+                        else -> {}
+                    } else when (ev.key) {
+                        Key.DirectionLeft -> { if (resIndex % DS_COLS == 0) searchInGrid = false else resIndex-- }
+                        Key.DirectionRight -> resIndex = (resIndex + 1).coerceAtMost(searchShown.size - 1)
+                        Key.DirectionUp -> { if (resIndex >= DS_COLS) resIndex -= DS_COLS }
+                        Key.DirectionDown -> resIndex = (resIndex + DS_COLS).coerceAtMost(searchShown.size - 1)
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> searchShown.getOrNull(resIndex)?.let { onOpen(it.type, it.id) }
+                        Key.MediaPlay, Key.MediaPlayPause -> searchShown.getOrNull(resIndex)?.let { onPlay(it.type, it.id) }
+                        Key.Menu -> searchShown.getOrNull(resIndex)?.let { menuOption = 0; menuItem = it }
+                        Key.Back -> searchInGrid = false
                         else -> {}
                     }
                     return@onPreviewKeyEvent true
@@ -295,7 +360,7 @@ internal fun NetflixDoramasScreen(
             Box(Modifier.fillMaxHeight().fillMaxWidth(0.7f).align(Alignment.TopEnd)) {
                 item?.backdrop?.let { AsyncImage(model = it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                 val trailerKey = item?.let { trailers[it.key] }
-                if (trailerKey != null && trailerSettings.autoPlay && !showIntro) {
+                if (trailerKey != null && trailerSettings.autoPlay && !showIntro && !searchOn) {
                     key(trailerKey) {
                         TrailerPlayer(youtubeKey = trailerKey, delayMs = trailerSettings.delaySeconds * 1000L + 1500L,
                             volume = if (trailerSettings.soundEnabled) 1f else 0f, modifier = Modifier.fillMaxSize())
@@ -414,14 +479,15 @@ internal fun NetflixDoramasScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val icon = when (c) {
+                        KChip.Search -> Icons.Default.Search
                         KChip.Surprise -> Icons.Default.Shuffle; KChip.Refresh -> Icons.Default.Refresh
                         KChip.Calendar -> Icons.Default.DateRange; KChip.Dub -> Icons.Default.RecordVoiceOver; else -> null
                     }
                     if (icon != null) {
                         Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
+                        if (c.label.isNotEmpty()) Spacer(Modifier.width(6.dp))
                     }
-                    Text(c.label, color = fg, fontSize = 13.sp, fontWeight = if (focused || selected) FontWeight.Bold else FontWeight.Medium)
+                    if (c.label.isNotEmpty()) Text(c.label, color = fg, fontSize = 13.sp, fontWeight = if (focused || selected) FontWeight.Bold else FontWeight.Medium)
                 }
             }
         }
@@ -467,6 +533,13 @@ internal fun NetflixDoramasScreen(
                     }
                 }
             }
+        }
+        if (searchOn) {
+            DoramaSearchPanel(
+                query = query, keyIndex = keyIndex, inGrid = searchInGrid, resIndex = resIndex,
+                results = searchResults, searching = searching, suggestions = homeRows.firstOrNull { it.id == "top10" }?.items.orEmpty(),
+                titles = titles, audio = audioMap, country = country.label
+            )
         }
         if (menuItem != null || menuRestore) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
@@ -514,6 +587,85 @@ private fun DoramaIntro(onDone: () -> Unit) {
             Text("DORAMAS", color = DoramaPink, fontSize = 72.sp, fontWeight = FontWeight.Black, letterSpacing = 8.sp,
                 style = TextStyle(shadow = Shadow(PinkSoft.copy(alpha = 0.6f), blurRadius = 30f)))
         }
+    }
+}
+
+/** Busca de doramas: teclado rosa à esquerda e resultados (séries e filmes asiáticos) em grade à direita. */
+@Composable
+private fun DoramaSearchPanel(
+    query: String, keyIndex: Int, inGrid: Boolean, resIndex: Int, results: List<DItem>, searching: Boolean,
+    suggestions: List<DItem>, titles: Map<String, String>, audio: Map<String, String>, country: String
+) {
+    Row(Modifier.fillMaxSize().background(Plum).padding(start = 56.dp, top = 40.dp, end = 24.dp)) {
+        Column(Modifier.width(260.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Favorite, contentDescription = null, tint = DoramaPink, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("BUSCAR DORAMAS", color = DoramaPink, fontSize = 13.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Search, contentDescription = null, tint = PinkSoft, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(query.ifEmpty { "Nome do dorama, filme…" }, color = if (query.isEmpty()) Color.White.copy(alpha = 0.45f) else Color.White,
+                    fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(DoramaPink.copy(alpha = 0.6f)))
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                DKbKey("espaço", focused = !inGrid && keyIndex == 0, wide = true)
+                DKbKey("apagar", focused = !inGrid && keyIndex == 1, wide = true)
+            }
+            Spacer(Modifier.height(4.dp))
+            DKB_KEYS.drop(2).chunked(DKB_COLS).forEachIndexed { r, rowKeys ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    rowKeys.forEachIndexed { c, k -> DKbKey(k, focused = !inGrid && keyIndex == 2 + r * DKB_COLS + c) }
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(if (country == "Todos") "Coreia, Japão, China, Taiwan e Tailândia" else "Só de: $country",
+                color = PinkSoft.copy(alpha = 0.6f), fontSize = 11.sp)
+            Text("Voltar fecha a busca", color = Color.White.copy(alpha = 0.35f), fontSize = 11.sp)
+        }
+        Spacer(Modifier.width(28.dp))
+        Column(Modifier.weight(1f)) {
+            val showing = if (query.trim().length >= 2) results else suggestions
+            Text(
+                when {
+                    query.trim().length < 2 -> "Em alta esta semana"
+                    searching && results.isEmpty() -> "Procurando…"
+                    results.isEmpty() -> "Nenhum dorama encontrado para \"$query\""
+                    else -> "Resultados para \"$query\""
+                },
+                color = PinkSoft, fontSize = 15.sp, fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(10.dp))
+            val gridState = rememberLazyGridState()
+            LaunchedEffect(resIndex, inGrid) { if (inGrid && showing.isNotEmpty()) gridState.animateScrollToItem(resIndex.coerceIn(0, showing.size - 1)) }
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(DS_COLS), state = gridState, userScrollEnabled = false,
+                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(top = 6.dp, bottom = 200.dp, end = 12.dp)
+            ) {
+                gridItemsIndexed(showing, key = { _, it -> it.key }) { i, it ->
+                    KCard(it, titles[it.key] ?: it.title, null, null, audio[it.key], inGrid && i == resIndex, showRating = true)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DKbKey(label: String, focused: Boolean, wide: Boolean = false) {
+    Box(
+        Modifier.size(width = if (wide) 121.dp else 38.dp, height = 34.dp)
+            .background(if (focused) DoramaPink else PinkSoft.copy(alpha = 0.08f), RoundedCornerShape(4.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color.White, fontSize = if (wide) 13.sp else 15.sp,
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.SemiBold, textAlign = TextAlign.Center)
     }
 }
 
